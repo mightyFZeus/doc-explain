@@ -1,0 +1,8 @@
+.env
+tmp
+*.log
+tmp/main
+intelligent-rag-platform-prd.md
+intelligent-rag-platform-prd
+prd-user-story-screen-blueprint.md
+prd-user-story-screen-blueprint
