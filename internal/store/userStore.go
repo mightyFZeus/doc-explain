@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mightyfzeus/doc-explain/internal/models"
 	"gorm.io/gorm"
@@ -32,6 +33,20 @@ func (us *UserStore) UserExists(ctx context.Context, email string) (bool, error)
 	err := us.db.WithContext(ctx).
 		Model(&models.User{}).
 		Where("email = ?", email).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+
+	return count > 0, nil
+}
+
+func (us *UserStore) UserExistsByID(ctx context.Context, id uuid.UUID) (bool, error) {
+	var count int64
+
+	err := us.db.WithContext(ctx).
+		Model(&models.User{}).
+		Where("id = ?", id).
 		Count(&count).Error
 	if err != nil {
 		return false, err

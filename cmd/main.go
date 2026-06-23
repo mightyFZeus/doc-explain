@@ -58,6 +58,7 @@ func main() {
 	if err != nil {
 		logger.Fatal("failed to connect asynq client", zap.Error(err))
 	}
+	defer asynqClient.Close()
 
 	sqlDB, err := gormDB.DB()
 	if err != nil {
@@ -82,10 +83,10 @@ func main() {
 			rateLimiters: make(map[string]*rate.Limiter),
 		},
 
-		store: store,
-		cld:   cld,
-		redis: redis,
-		asynqClient:asynqClient,
+		store:       store,
+		cld:         cld,
+		redis:       redis,
+		asynqClient: asynqClient,
 	}
 
 	mux := app.mount()

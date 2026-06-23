@@ -55,6 +55,7 @@ func migrate(db *gorm.DB) error {
 	statements := []string{
 		`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";`,
 		`CREATE EXTENSION IF NOT EXISTS pgcrypto;`,
+		`CREATE EXTENSION IF NOT EXISTS vector;`,
 	}
 
 	// Execute other SQL statements
@@ -118,6 +119,5 @@ func InitAsynqClient(addr, username, password string, db int) (*asynq.Client, er
 		Password: password,
 		DB:       db,
 	})
-	defer client.Close()
 	return client, nil
 }
