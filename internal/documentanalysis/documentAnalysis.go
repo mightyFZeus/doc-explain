@@ -1,6 +1,19 @@
 package documentanalysis
 
-import "strings"
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/mightyfzeus/doc-explain/internal/env"
+	"github.com/mightyfzeus/doc-explain/internal/jobs"
+	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/option"
+	"github.com/openai/openai-go/responses"
+	"github.com/teilomillet/raggo"
+)
 
 func ClassifyDocument(text string) (string, float64) {
 	lower := strings.ToLower(text)
@@ -57,4 +70,97 @@ func countMatches(text string, keywords ...string) int {
 		}
 	}
 	return count
+}
+
+func ExtractTextWithOpenAI(ctx context.Context, filePath string) (string, error) {
+	apiKey := env.GetString("OPENAI_API_KEY", "")
+	if apiKey == "" {
+		return "", fmt.Errorf("OPENAI_API_KEY is required")
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("open pdf for openai extraction: %w", err)
+	}
+	defer f.Close()
+
+	client := openai.NewClient(option.WithAPIKey(apiKey))
+
+	file, err := client.Files.New(ctx, openai.FileNewParams{
+		File:    f,
+		Purpose: openai.FilePurposeUserData,
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload file to openai: %w", err)
+	}
+
+	resp, err := client.Responses.New(ctx, responses.ResponseNewParams{
+		Model: "gpt-5.5",
+		Input: responses.ResponseNewParamsInputUnion{
+			OfInputItemList: responses.ResponseInputParam{
+				responses.ResponseInputItemParamOfMessage(
+					responses.ResponseInputMessageContentListParam{
+						responses.ResponseInputContentParamOfInputText(`
+Extract all readable text from this document.
+
+Rules:
+- Return only clean plain text.
+- Preserve headings, paragraphs, bullets, and tables as readable text.
+- Include page breaks as: --- page N ---
+- Do not summarize.
+- Do not add commentary.
+`),
+						{
+							OfInputFile: &responses.ResponseInputFileParam{
+								FileID: openai.String(file.ID),
+							},
+						},
+					},
+					responses.EasyInputMessageRoleUser,
+				),
+			},
+		},
+		MaxOutputTokens: openai.Int(12000),
+	})
+	if err != nil {
+		return "", fmt.Errorf("extract text with openai: %w", err)
+	}
+
+	text := strings.TrimSpace(resp.OutputText())
+	if text == "" {
+		return "", fmt.Errorf("openai returned empty file extraction")
+	}
+
+	return text, nil
+}
+
+func ParserForPayload(payload jobs.ProcessDocumentPayload) raggo.Parser {
+	format := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(payload.Format)), ".")
+	filename := strings.ToLower(payload.OriginalFilename)
+	url := strings.ToLower(payload.SecureURL)
+
+	switch {
+	case format == "pdf" || strings.HasSuffix(filename, ".pdf") || strings.HasSuffix(url, ".pdf"):
+		return raggo.PDFParser()
+	case format == "txt" ||
+		format == "text" ||
+		format == "md" ||
+		format == "markdown" ||
+		strings.HasSuffix(filename, ".txt") ||
+		strings.HasSuffix(filename, ".md") ||
+		strings.HasSuffix(filename, ".markdown") ||
+		strings.Contains(url, "/raw/upload/"):
+		return raggo.TextParser()
+	default:
+		return raggo.NewParser()
+	}
+}
+
+func DocumentIDFromPayload(value string) (uuid.UUID, error) {
+	value = strings.TrimSpace(value)
+	if index := strings.LastIndex(value, "/"); index >= 0 {
+		value = value[index+1:]
+	}
+
+	return uuid.Parse(value)
 }

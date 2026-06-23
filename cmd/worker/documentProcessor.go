@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 	"github.com/mightyfzeus/doc-explain/internal/documentanalysis"
 	"github.com/mightyfzeus/doc-explain/internal/env"
@@ -94,12 +92,12 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 		return fmt.Errorf("secureUrl is required: %w", asynq.SkipRetry)
 	}
 
-	documentID, err := documentIDFromPayload(payload.DocumentID)
+	documentID, err := documentanalysis.DocumentIDFromPayload(payload.DocumentID)
 	if err != nil {
 		return fmt.Errorf("invalid document id: %w: %v", asynq.SkipRetry, err)
 	}
 
-	parser := parserForPayload(payload)
+	parser := documentanalysis.ParserForPayload(payload)
 
 	// TODO: Get the document from cloudinary
 	filePath, err := p.loader.LoadURL(ctx, payload.SecureURL)
@@ -108,6 +106,20 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 	}
 
 	document, err := parser.Parse(filePath)
+	var text string
+	// parse document content with open ai fallback, if raggo parser fails
+
+	if err != nil {
+		text, err = documentanalysis.ExtractTextWithOpenAI(ctx, payload.SecureURL)
+		if err != nil {
+			if statusErr := p.store.Documents.UpdateDocumentProcessingStatus(ctx, documentID, "failed", "failed", 0); statusErr != nil {
+				return fmt.Errorf("mark document failed after openai parse fallback: %v: original error: %w", statusErr, err)
+			}
+			return fmt.Errorf("parse document with openai fallback: %w: %v", asynq.SkipRetry, err)
+		}
+	} else {
+		text = document.Content
+	}
 	if err != nil {
 		if statusErr := p.store.Documents.UpdateDocumentProcessingStatus(ctx, documentID, "failed", "failed", 0); statusErr != nil {
 			return fmt.Errorf("mark document failed after parse error: %v: original error: %w", statusErr, err)
@@ -115,7 +127,6 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 		return fmt.Errorf("parse document: %w: %v", asynq.SkipRetry, err)
 	}
 
-	text := document.Content
 	classification, confidence := documentanalysis.ClassifyDocument(text)
 	summary := documentanalysis.SummarizeDocument(text)
 
@@ -221,35 +232,4 @@ func (p *DocumentProcessor) embedChunksWithRetry(ctx context.Context, chunks []r
 	}
 
 	return nil, lastErr
-}
-
-func parserForPayload(payload jobs.ProcessDocumentPayload) raggo.Parser {
-	format := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(payload.Format)), ".")
-	filename := strings.ToLower(payload.OriginalFilename)
-	url := strings.ToLower(payload.SecureURL)
-
-	switch {
-	case format == "pdf" || strings.HasSuffix(filename, ".pdf") || strings.HasSuffix(url, ".pdf"):
-		return raggo.PDFParser()
-	case format == "txt" ||
-		format == "text" ||
-		format == "md" ||
-		format == "markdown" ||
-		strings.HasSuffix(filename, ".txt") ||
-		strings.HasSuffix(filename, ".md") ||
-		strings.HasSuffix(filename, ".markdown") ||
-		strings.Contains(url, "/raw/upload/"):
-		return raggo.TextParser()
-	default:
-		return raggo.NewParser()
-	}
-}
-
-func documentIDFromPayload(value string) (uuid.UUID, error) {
-	value = strings.TrimSpace(value)
-	if index := strings.LastIndex(value, "/"); index >= 0 {
-		value = value[index+1:]
-	}
-
-	return uuid.Parse(value)
 }
