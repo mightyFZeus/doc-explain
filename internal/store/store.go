@@ -25,6 +25,12 @@ type Storage struct {
 		ShouldProcessDocumentWebhook(ctx context.Context, documentID uuid.UUID) (bool, error)
 		UpdateDocumentProcessingResult(ctx context.Context, documentID uuid.UUID, status string, processingStatus string, chunkCount int, classification string, confidence float64, summary string) error
 		CreateChunks(ctx context.Context, chunks []models.DocumentChunk) error
+		SearchDocumentChunks(
+			ctx context.Context,
+			documentID uuid.UUID,
+			queryEmbedding []float64,
+			limit int,
+		) ([]models.RetrievedDocumentChunk, error)
 	}
 }
 

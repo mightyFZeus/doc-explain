@@ -9,9 +9,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/mightyfzeus/doc-explain/internal/env"
 	"github.com/mightyfzeus/doc-explain/internal/jobs"
-	"github.com/openai/openai-go"
-	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/responses"
+	"github.com/openai/openai-go/v2"
+	"github.com/openai/openai-go/v2/option"
+	"github.com/openai/openai-go/v2/responses"
 	"github.com/teilomillet/raggo"
 )
 

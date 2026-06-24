@@ -3,13 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/hibiken/asynq"
+	"github.com/mightyfzeus/doc-explain/cmd/service"
 	"github.com/mightyfzeus/doc-explain/internal/documentanalysis"
-	"github.com/mightyfzeus/doc-explain/internal/env"
 	"github.com/mightyfzeus/doc-explain/internal/jobs"
 	"github.com/mightyfzeus/doc-explain/internal/models"
 	"github.com/mightyfzeus/doc-explain/internal/store"
@@ -24,48 +23,24 @@ type DocumentProcessor struct {
 	chunker        raggo.Chunker
 	embedding      *raggo.EmbeddingService
 	embeddingModel string
+	service        *service.Service
 }
 
 func NewDocumentProcessor(store store.Storage, logger *zap.SugaredLogger) (*DocumentProcessor, error) {
-
-	apiKey := env.GetString("OPENAI_API_KEY", "")
-	if apiKey == "" {
-		return nil, errors.New("OPENAI_API_KEY is required")
-	}
-	embeddingModel := env.GetString("OPEN_AI_EMBEDDING_MODEL", "")
-	if embeddingModel == "" {
-		return nil, errors.New("OPEN_AI_EMBEDDING_MODEL is required")
-	}
-	embeddingProvider := env.GetString("MODEL_PROVIDER", "")
-	if embeddingProvider == "" {
-		return nil, errors.New("MODEL_PROVIDER is required")
-	}
-
-	chunker, err := raggo.NewChunker(
-		raggo.ChunkSize(250),
-		raggo.ChunkOverlap(40),
-		raggo.WithSentenceSplitter(raggo.SmartSentenceSplitter()),
-	)
+	svc, err := service.NewService()
 	if err != nil {
-		return nil, fmt.Errorf("create raggo chunker: %w", err)
+		logger.Errorf("error", "Failed to create service", err)
+		return nil, err
 	}
 
-	embedder, err := raggo.NewEmbedder(
-		raggo.SetEmbedderAPIKey(apiKey),
-		raggo.SetEmbedderModel(embeddingModel),
-		raggo.SetEmbedderProvider(embeddingProvider),
-		raggo.SetOption("timeout", 2*time.Minute),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create raggo embedder: %w", err)
-	}
 	return &DocumentProcessor{
 		store:          store,
 		logger:         logger,
 		loader:         raggo.NewLoader(raggo.SetLoaderTimeout(5 * time.Minute)),
-		embedding:      raggo.NewEmbeddingService(embedder),
-		chunker:        chunker,
-		embeddingModel: embeddingModel,
+		embedding:      svc.Embedder,
+		chunker:        svc.Chunker,
+		embeddingModel: svc.EmbeddingModel,
+		service:        svc,
 	}, nil
 }
 

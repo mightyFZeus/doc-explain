@@ -70,3 +70,13 @@ type TriggeredBy struct {
 	AuthType string `json:"auth_type"`
 	AuthID   string `json:"auth_id"`
 }
+
+type Answer struct {
+	Text    string         `json:"text"`
+	Sources []AnswerSource `json:"sources"`
+}
+
+type AnswerSource struct {
+	ChunkIndex int     `json:"chunkIndex"`
+	Distance   float64 `json:"distance"`
+}

@@ -76,9 +76,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/leodido/go-urn v1.4.0 // indirect
-	github.com/openai/openai-go v1.12.0
 	github.com/openai/openai-go/v2 v2.7.1
-	github.com/openai/openai-go/v3 v3.41.0
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect

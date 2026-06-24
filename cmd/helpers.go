@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,6 +19,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/mightyfzeus/doc-explain/internal/env"
+	"github.com/mightyfzeus/doc-explain/internal/models"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -197,4 +204,45 @@ func IsAllowedDocumentUpload(fileName string, detectedType string) bool {
 	default:
 		return false
 	}
+}
+
+func FormatChunksForPrompt(chunks []models.RetrievedDocumentChunk) string {
+	var b strings.Builder
+
+	for _, chunk := range chunks {
+		fmt.Fprintf(&b, "[chunk %d | distance %.4f]\n%s\n\n", chunk.ChunkIndex, chunk.Distance, chunk.Content)
+	}
+
+	return b.String()
+}
+
+func VerifyCloudinaryWebhook(body []byte, timestamp int64, signature, apiSecret string) bool {
+	var minifiedBuffer bytes.Buffer
+	if err := json.Compact(&minifiedBuffer, body); err != nil {
+		return false
+	}
+
+	payloadStr := minifiedBuffer.String() + strconv.FormatInt(timestamp, 10) + apiSecret
+
+	hash := sha1.Sum([]byte(payloadStr))
+	expectedSignature := hex.EncodeToString(hash[:])
+
+	return subtle.ConstantTimeCompare(
+		[]byte(expectedSignature),
+		[]byte(signature),
+	) == 1
+}
+
+func DocumentIDFromPublicID(publicID string) (uuid.UUID, error) {
+	value := strings.TrimSpace(publicID)
+	if index := strings.LastIndex(value, "/"); index >= 0 {
+		value = value[index+1:]
+	}
+
+	documentID, err := uuid.Parse(value)
+	if err != nil {
+		return uuid.Nil, errors.New("invalid cloudinary public_id")
+	}
+
+	return documentID, nil
 }

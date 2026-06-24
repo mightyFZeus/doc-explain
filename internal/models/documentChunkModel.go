@@ -79,3 +79,11 @@ type DocumentChunk struct {
 	CreatedAt      time.Time       `json:"createdAt"`
 	UpdatedAt      time.Time       `json:"updatedAt"`
 }
+
+type RetrievedDocumentChunk struct {
+	DocumentID uuid.UUID       `json:"documentId"`
+	ChunkIndex int             `json:"chunkIndex"`
+	Content    string          `json:"content"`
+	Metadata   json.RawMessage `json:"metadata"`
+	Distance   float64         `json:"distance"`
+}

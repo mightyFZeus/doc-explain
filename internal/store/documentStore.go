@@ -123,3 +123,35 @@ func (ds *DocumentStore) UpdateDocumentProcessingResult(ctx context.Context, doc
 		Where("id = ?", documentID).
 		Updates(updates).Error
 }
+
+func (ds *DocumentStore) SearchDocumentChunks(
+	ctx context.Context,
+	documentID uuid.UUID,
+	queryEmbedding []float64,
+	limit int,
+) ([]models.RetrievedDocumentChunk, error) {
+	if limit <= 0 {
+		limit = 8
+	}
+
+	var chunks []models.RetrievedDocumentChunk
+
+	err := ds.db.WithContext(ctx).
+		Raw(`
+	SELECT
+    document_id,
+    chunk_index,
+    content,
+    metadata,
+    embedding <=> CAST(? AS vector) AS distance
+FROM document_chunks
+WHERE document_id = ?
+  -- Corrected line: No "AS" alias used here
+  AND (embedding <=> CAST(? AS vector)) < 0.6 
+ORDER BY distance ASC
+LIMIT ?
+		`, models.Vector(queryEmbedding), documentID, models.Vector(queryEmbedding), limit).
+		Scan(&chunks).Error
+
+	return chunks, err
+}

@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/hibiken/asynq"
+	"github.com/mightyfzeus/doc-explain/cmd/service"
 	"github.com/mightyfzeus/doc-explain/internal/store"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -24,6 +25,8 @@ type application struct {
 	cld         *cloudinary.Cloudinary
 	redis       *redis.Client
 	asynqClient *asynq.Client
+
+	service *service.Service
 }
 
 type config struct {
@@ -74,6 +77,7 @@ func (app *application) mount() http.Handler {
 	r.Post("/auth/register", app.RegisterUser)
 	r.Post("/document/upload", app.UploadDocumentHandler)
 	r.Post("/cloudinary/webhook", app.CloudinaryUploadWebhook)
+	r.Post("/document/search", app.SearchThroughDocumentHandler)
 
 	return r
 }

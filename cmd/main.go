@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"github.com/joho/godotenv"
+	"github.com/mightyfzeus/doc-explain/cmd/service"
 	"github.com/mightyfzeus/doc-explain/internal/db"
 	"github.com/mightyfzeus/doc-explain/internal/env"
 	"github.com/mightyfzeus/doc-explain/internal/store"
@@ -75,6 +76,10 @@ func main() {
 
 	// store
 	store := store.NewStorage(gormDB)
+	svc, err := service.NewService()
+	if err != nil {
+		logger.Fatal("failed to create service", zap.Error(err))
+	}
 
 	app := &application{
 		config: cfg,
@@ -87,6 +92,7 @@ func main() {
 		cld:         cld,
 		redis:       redis,
 		asynqClient: asynqClient,
+		service:     svc,
 	}
 
 	mux := app.mount()
