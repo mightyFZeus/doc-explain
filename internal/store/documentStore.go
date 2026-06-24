@@ -39,6 +39,105 @@ func (ds *DocumentStore) SaveDocument(ctx context.Context, document models.Docum
 		Create(&document).Error
 }
 
+func (ds *DocumentStore) GetAllDocuments(ctx context.Context) ([]models.Document, error) {
+	var documents []models.Document
+
+	err := ds.db.WithContext(ctx).
+		Where("deleted_at IS NULL").
+		Order("created_at DESC").
+		Find(&documents).Error
+
+	return documents, err
+}
+
+func (ds *DocumentStore) DeleteDocument(ctx context.Context, documentID uuid.UUID) error {
+	return ds.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.
+			Unscoped().
+			Model(&models.Document{}).
+			Where("id = ?", documentID).
+			Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return ErrDocumentNotFound
+		}
+
+		var conversationIDs []uuid.UUID
+		if err := tx.
+			Model(&models.DocumentConversation{}).
+			Where("document_id = ?", documentID).
+			Pluck("id", &conversationIDs).Error; err != nil {
+			return err
+		}
+
+		if len(conversationIDs) > 0 {
+			if err := tx.
+				Where("conversation_id IN ?", conversationIDs).
+				Delete(&models.DocumentMessage{}).Error; err != nil {
+				return err
+			}
+		}
+
+		if err := tx.
+			Where("document_id = ?", documentID).
+			Delete(&models.DocumentConversation{}).Error; err != nil {
+			return err
+		}
+
+		if err := tx.
+			Where("document_id = ?", documentID).
+			Delete(&models.DocumentChunk{}).Error; err != nil {
+			return err
+		}
+
+		return tx.
+			Unscoped().
+			Where("id = ?", documentID).
+			Delete(&models.Document{}).Error
+	})
+}
+
+func (ds *DocumentStore) EncryptPlaintextChunks(ctx context.Context, encrypt func(string) (string, error)) (int64, error) {
+	var encryptedCount int64
+
+	err := ds.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var chunks []struct {
+			ID      uuid.UUID
+			Content string
+		}
+
+		if err := tx.
+			Model(&models.DocumentChunk{}).
+			Select("id", "content").
+			Where("content NOT LIKE ?", "v1:%").
+			Find(&chunks).Error; err != nil {
+			return err
+		}
+
+		for _, chunk := range chunks {
+			encryptedContent, err := encrypt(chunk.Content)
+			if err != nil {
+				return err
+			}
+
+			if err := tx.
+				Model(&models.DocumentChunk{}).
+				Where("id = ?", chunk.ID).
+				Update("content", encryptedContent).Error; err != nil {
+				return err
+			}
+
+			encryptedCount++
+		}
+
+		return nil
+	})
+
+	return encryptedCount, err
+}
+
 func (ds *DocumentStore) UpdateDocumentProcessingStatus(ctx context.Context, documentID uuid.UUID, status string, processingStatus string, chunkCount int) error {
 	updates := map[string]any{
 		"status":             status,
@@ -139,18 +238,18 @@ func (ds *DocumentStore) SearchDocumentChunks(
 	err := ds.db.WithContext(ctx).
 		Raw(`
 	SELECT
-    document_id,
-    chunk_index,
-    content,
-    metadata,
-    embedding <=> CAST(? AS vector) AS distance
+    document_chunks.document_id,
+    document_chunks.chunk_index,
+    document_chunks.content,
+    document_chunks.metadata,
+    document_chunks.embedding <=> CAST(? AS vector) AS distance
 FROM document_chunks
-WHERE document_id = ?
-  -- Corrected line: No "AS" alias used here
-  AND (embedding <=> CAST(? AS vector)) < 0.6 
+JOIN documents ON documents.id = document_chunks.document_id
+WHERE document_chunks.document_id = ?
+  AND documents.deleted_at IS NULL
 ORDER BY distance ASC
 LIMIT ?
-		`, models.Vector(queryEmbedding), documentID, models.Vector(queryEmbedding), limit).
+		`, models.Vector(queryEmbedding), documentID, limit).
 		Scan(&chunks).Error
 
 	return chunks, err

@@ -147,8 +147,11 @@ Default routes:
 ```text
 GET  /health
 POST /auth/register
+GET  /documents
 POST /document/upload
+DELETE /documents/{documentId}
 POST /cloudinary/webhook
+GET  /document/conversations
 POST /document/search
 ```
 

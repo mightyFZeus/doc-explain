@@ -68,6 +68,13 @@ func main() {
 	if err != nil {
 		logger.Fatal("failed to create document processor", zap.Error(err))
 	}
+	encryptedChunks, err := store.Documents.EncryptPlaintextChunks(context.Background(), processor.service.ChunkCipher.Encrypt)
+	if err != nil {
+		logger.Fatal("failed to encrypt plaintext chunks", zap.Error(err))
+	}
+	if encryptedChunks > 0 {
+		logger.Infow("encrypted plaintext chunks", "count", encryptedChunks)
+	}
 	mux.Handle(jobs.TypeProcessDocument, processor)
 	// start server
 	logger.Info("server is running")

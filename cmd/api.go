@@ -75,8 +75,11 @@ func (app *application) mount() http.Handler {
 
 	r.Get("/health", app.HealthHandler)
 	r.Post("/auth/register", app.RegisterUser)
+	r.Get("/documents", app.GetAllDocumentsHandler)
 	r.Post("/document/upload", app.UploadDocumentHandler)
+	r.Delete("/document", app.DeleteDocumentHandler)
 	r.Post("/cloudinary/webhook", app.CloudinaryUploadWebhook)
+	r.Get("/document/conversations", app.GetDocumentConversationsHandler)
 	r.Post("/document/search", app.SearchThroughDocumentHandler)
 
 	return r

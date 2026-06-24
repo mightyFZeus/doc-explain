@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mightyfzeus/doc-explain/cmd/helpers"
 	"github.com/mightyfzeus/doc-explain/internal/dtos"
 	"github.com/mightyfzeus/doc-explain/internal/models"
 )
@@ -14,7 +15,7 @@ func (app *application) RegisterUser(w http.ResponseWriter, r *http.Request) {
 	var payload dtos.UserDto
 	ctx := r.Context()
 
-	if err := app.DecodeAndValidate(w, r, &payload); err != nil {
+	if err := helpers.DecodeAndValidate(w, r, &payload); err != nil {
 		app.logger.Errorf("can't decode and validate: %v", err)
 		return
 	}
@@ -23,7 +24,7 @@ func (app *application) RegisterUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hashedPassword, err := HashPassword(payload.Password)
+	hashedPassword, err := helpers.HashPassword(payload.Password)
 	if err != nil {
 		app.logger.Errorf("unable to hash password: %v", err)
 		app.badRequestResponse(w, r, err)

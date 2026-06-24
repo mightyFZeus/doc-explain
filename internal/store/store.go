@@ -11,6 +11,7 @@ import (
 
 var (
 	ErrEmailAlreadyExists = errors.New("email already exists")
+	ErrDocumentNotFound   = errors.New("document not found")
 )
 
 type Storage struct {
@@ -21,6 +22,9 @@ type Storage struct {
 	}
 	Documents interface {
 		SaveDocument(ctx context.Context, document models.Document) error
+		GetAllDocuments(ctx context.Context) ([]models.Document, error)
+		DeleteDocument(ctx context.Context, documentID uuid.UUID) error
+		EncryptPlaintextChunks(ctx context.Context, encrypt func(string) (string, error)) (int64, error)
 		UpdateDocumentProcessingStatus(ctx context.Context, documentID uuid.UUID, status string, processingStatus string, chunkCount int) error
 		ShouldProcessDocumentWebhook(ctx context.Context, documentID uuid.UUID) (bool, error)
 		UpdateDocumentProcessingResult(ctx context.Context, documentID uuid.UUID, status string, processingStatus string, chunkCount int, classification string, confidence float64, summary string) error
@@ -32,11 +36,18 @@ type Storage struct {
 			limit int,
 		) ([]models.RetrievedDocumentChunk, error)
 	}
+	Conversations interface {
+		GetOrCreateByDocumentID(ctx context.Context, documentID uuid.UUID) (models.DocumentConversation, error)
+		GetByDocumentID(ctx context.Context, documentID uuid.UUID) ([]models.DocumentConversation, error)
+		CreateMessage(ctx context.Context, message models.DocumentMessage) error
+		GetRecentMessages(ctx context.Context, conversationID uuid.UUID, limit int) ([]models.DocumentMessage, error)
+	}
 }
 
 func NewStorage(db *gorm.DB) Storage {
 	return Storage{
-		Users:     &UserStore{db: db},
-		Documents: &DocumentStore{db: db},
+		Users:         &UserStore{db: db},
+		Documents:     &DocumentStore{db: db},
+		Conversations: &ConversationStore{db: db},
 	}
 }

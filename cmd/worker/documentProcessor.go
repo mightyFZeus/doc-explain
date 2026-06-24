@@ -162,11 +162,15 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 		if content == "" {
 			content = chunks[i].Text
 		}
+		encryptedContent, err := p.service.ChunkCipher.Encrypt(content)
+		if err != nil {
+			return fmt.Errorf("encrypt chunk content: %w", err)
+		}
 
 		rows = append(rows, models.DocumentChunk{
 			DocumentID:     documentID,
 			ChunkIndex:     i,
-			Content:        content,
+			Content:        encryptedContent,
 			TokenSize:      chunks[i].TokenSize,
 			StartSentence:  chunks[i].StartSentence,
 			EndSentence:    chunks[i].EndSentence,

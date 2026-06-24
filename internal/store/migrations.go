@@ -17,7 +17,11 @@ func AutoMigrate(db *gorm.DB) error {
 		return err
 	}
 
-	if err := db.AutoMigrate(&models.User{}, &models.Document{}, &models.DocumentChunk{}); err != nil {
+	if err := db.AutoMigrate(&models.User{},
+		&models.Document{},
+		&models.DocumentChunk{},
+		&models.DocumentConversation{},
+		&models.DocumentMessage{}); err != nil {
 		return err
 	}
 

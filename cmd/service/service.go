@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mightyfzeus/doc-explain/cmd/security"
 	"github.com/mightyfzeus/doc-explain/internal/env"
 	"github.com/openai/openai-go/v2"
 	"github.com/openai/openai-go/v2/option"
@@ -18,6 +19,7 @@ type Service struct {
 	TopK           int
 	Chunker        raggo.Chunker
 	EmbeddingModel string
+	ChunkCipher    *security.ChunkCipher
 }
 
 func NewService() (*Service, error) {
@@ -54,6 +56,16 @@ func NewService() (*Service, error) {
 
 	openaiClient := openai.NewClient(option.WithAPIKey(apiKey))
 
+	chunkEncryptionKey := env.GetString("DOC_CHUNK_ENCRYPTION_KEY", "")
+	if chunkEncryptionKey == "" {
+		return nil, errors.New("DOC_CHUNK_ENCRYPTION_KEY is required")
+	}
+
+	chunkCipher, err := security.NewChunkCipher(chunkEncryptionKey)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Service{
 		Embedder:       raggo.NewEmbeddingService(embedder),
 		LLMModel:       env.GetString("OPEN_AI_MODEL", ""),
@@ -61,5 +73,6 @@ func NewService() (*Service, error) {
 		Chunker:        chunker,
 		OpenAI:         &openaiClient,
 		EmbeddingModel: embeddingModel,
+		ChunkCipher:    chunkCipher,
 	}, nil
 }

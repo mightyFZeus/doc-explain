@@ -14,10 +14,12 @@ import (
 	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+	"github.com/mightyfzeus/doc-explain/cmd/helpers"
 	"github.com/mightyfzeus/doc-explain/internal/dtos"
 	"github.com/mightyfzeus/doc-explain/internal/env"
 	"github.com/mightyfzeus/doc-explain/internal/jobs"
 	"github.com/mightyfzeus/doc-explain/internal/models"
+	"github.com/mightyfzeus/doc-explain/internal/store"
 	"github.com/openai/openai-go/v2"
 )
 
@@ -53,7 +55,7 @@ func (app *application) UploadDocumentHandler(w http.ResponseWriter, r *http.Req
 
 	fileName := strings.ToLower(fileHeader.Filename)
 	detectedType := http.DetectContentType(buffer[:bytesRead])
-	if !IsAllowedDocumentUpload(fileName, detectedType) {
+	if !helpers.IsAllowedDocumentUpload(fileName, detectedType) {
 		http.Error(w, "File type not allowed", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -129,6 +131,50 @@ func (app *application) UploadDocumentHandler(w http.ResponseWriter, r *http.Req
 
 }
 
+func (app *application) GetAllDocumentsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	documents, err := app.store.Documents.GetAllDocuments(ctx)
+	if err != nil {
+		app.internalServerError(w, r, err)
+		return
+	}
+
+	app.jsonResponse(w, http.StatusOK, map[string]any{
+		"documents": documents,
+		"count":     len(documents),
+	})
+}
+
+func (app *application) DeleteDocumentHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	documentIdStr := r.URL.Query().Get("documentId")
+	if documentIdStr == "" {
+		app.badRequestResponse(w, r, errors.New("documentId is required"))
+		return
+	}
+
+	documentID, err := uuid.Parse(documentIdStr)
+	if err != nil {
+		app.badRequestResponse(w, r, errors.New("invalid documentId"))
+		return
+	}
+
+	if err := app.store.Documents.DeleteDocument(ctx, documentID); err != nil {
+		if errors.Is(err, store.ErrDocumentNotFound) {
+			app.notFoundResponse(w, r, err)
+			return
+		}
+		app.internalServerError(w, r, err)
+		return
+	}
+
+	app.jsonResponse(w, http.StatusOK, map[string]string{
+		"documentId": documentID.String(),
+		"status":     "deleted",
+	})
+}
+
 func (app *application) CloudinaryUploadWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -162,7 +208,7 @@ func (app *application) CloudinaryUploadWebhook(w http.ResponseWriter, r *http.R
 
 	apiSecret := env.GetString("CLOUDINARY_API_SECRET", "")
 
-	isValid := VerifyCloudinaryWebhook(bodyBytes, timestamp, signature, apiSecret)
+	isValid := helpers.VerifyCloudinaryWebhook(bodyBytes, timestamp, signature, apiSecret)
 	if !isValid {
 		app.logger.Errorf("error", "Invalid signature. Request source unverified.")
 		app.unauthorizedResponse(w, r, errors.New("Invalid signature."))
@@ -175,7 +221,7 @@ func (app *application) CloudinaryUploadWebhook(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	documentID, err := DocumentIDFromPublicID(payload.PublicID)
+	documentID, err := helpers.DocumentIDFromPublicID(payload.PublicID)
 	if err != nil {
 		app.badRequestResponse(w, r, err)
 		return
@@ -237,12 +283,40 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 	ctx := r.Context()
 
 	var payload dtos.SearchDocumentDto
-	if err := app.DecodeAndValidate(w, r, &payload); err != nil {
+	if err := helpers.DecodeAndValidate(w, r, &payload); err != nil {
 		return
 	}
 	query := strings.TrimSpace(payload.Query)
 
-	queryEmbedding, err := app.service.Embedder.Embed(ctx, query)
+	conversation, err := app.store.Conversations.GetOrCreateByDocumentID(ctx, payload.DocumentID)
+	if err != nil {
+		app.internalServerError(w, r, err)
+		return
+	}
+
+	history, err := app.store.Conversations.GetRecentMessages(ctx, conversation.ID, 6)
+	if err != nil {
+		app.internalServerError(w, r, err)
+		return
+	}
+
+	standaloneQuery, err := helpers.RewriteQueryForRetrieval(ctx, query, history)
+	if err != nil {
+		app.logger.Errorf("error", "Failed to rewrite query", err)
+		app.internalServerError(w, r, err)
+		return
+	}
+	if err := app.store.Conversations.CreateMessage(ctx, models.DocumentMessage{
+		ConversationID: conversation.ID,
+		Role:           "user",
+		Content:        query,
+	}); err != nil {
+		app.logger.Errorf("error", "Failed to create message", err)
+		app.internalServerError(w, r, err)
+		return
+	}
+
+	queryEmbedding, err := app.service.Embedder.Embed(ctx, standaloneQuery)
 	if err != nil {
 		app.logger.Errorw("error", "Failed to embed query", err)
 		app.internalServerError(w, r, err)
@@ -265,7 +339,16 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 		})
 		return
 	}
-	contextText := FormatChunksForPrompt(chunks)
+	for i := range chunks {
+		chunks[i].Content, err = app.service.ChunkCipher.Decrypt(chunks[i].Content)
+		if err != nil {
+			app.logger.Errorw("error", "Failed to decrypt chunk content", err)
+			app.internalServerError(w, r, err)
+			return
+		}
+	}
+	contextText := helpers.FormatChunksForPrompt(chunks)
+	prompt := helpers.GetPrompt(history, contextText, query)
 
 	// Set headers  streaming
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -276,43 +359,18 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 	stream := app.service.OpenAI.Chat.Completions.NewStreaming(ctx, openai.ChatCompletionNewParams{
 		Model: openai.ChatModel(app.service.LLMModel),
 		Messages: []openai.ChatCompletionMessageParamUnion{
-			openai.UserMessage(fmt.Sprintf(`
-You are a strict, factual assistant that answers questions using ONLY the provided document excerpts. 
-
-CRITICAL RULE: Before generating a single word of output, perform an internal check. Does the provided text contain explicit answers to EVERY parameter requested in the prompt without needing unauthorized calculations or stitching completely unrelated contexts together? If NO, your entire output must strictly be "I could not find that in this document." and nothing else. Do not start a sentence explaining partial facts.
-
-Rules:
-1. Context Isolation: Treat separate sections, companies, or projects in the text as isolated. Do NOT link a skill, technology, or action from one section to an event or project in another unless the text explicitly combines them. 
-   - EXCEPTION: You may cross-reference facts from separate chunks ONLY if the user's question explicitly names both sections/topics (e.g., "under Section 13 and Section 19").
-
-2. Strict Truthfulness: If the context does not contain the answer, or if the question implicitly links two unrelated facts from the text, you must say: "I could not find that in this document."
-
-3. No Hallucinations: Do not assume, extrapolate, or use outside knowledge. If the exact relationship asked about is not written down, it does not exist.
-
-4. Formatting: Be highly concise. Cite chunk numbers like [chunk 3] at the end of relevant sentences.
-
-5. No Mathematical Extrapolation: Do NOT perform arithmetic calculations (addition, subtraction, division, averages) on numbers found in the text to derive new statistics or financials. 
-   - EXCEPTION: You are permitted to map logical time equivalents based on standard language (e.g., understanding that "two quarters" equals "half-yearly" or "six months"), but you must never compute financial balances or invent unwritten statistics.
-
-6. Multi-Part Query Compliance: If a question asks for a specific combination of answers (e.g., a validity statement AND a service method), you must locate BOTH components in the retrieved text. If either component is completely missing or unwritten, do not attempt a partial answer. Fall back instantly to: "I could not find that in this document."
-
-
-Question:
-%s
-
-Document excerpts:
-%s
-
-Answer:
-`, query, contextText)),
+			openai.UserMessage(prompt),
 		},
 		MaxTokens: openai.Int(1200),
 	})
 
+	var answer strings.Builder
 	// Stream the response
 	for stream.Next() {
 		event := stream.Current()
 		if len(event.Choices) > 0 && event.Choices[0].Delta.Content != "" {
+			content := event.Choices[0].Delta.Content
+			answer.WriteString(content)
 			chunkData, _ := json.Marshal(map[string]string{"content": event.Choices[0].Delta.Content})
 			fmt.Fprintf(w, "data: %s\n\n", chunkData)
 			if flusher, ok := w.(http.Flusher); ok {
@@ -329,10 +387,46 @@ Answer:
 			flusher.Flush()
 		}
 	}
+	if err := app.store.Conversations.CreateMessage(ctx, models.DocumentMessage{
+		ConversationID: conversation.ID,
+		Role:           "assistant",
+		Content:        answer.String(),
+	}); err != nil {
+		app.logger.Errorw("failed to save assistant message", "error", err)
+	}
 
 	// Send done signal
 	fmt.Fprintf(w, "data: {\"done\": true}\n\n")
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+func (app *application) GetDocumentConversationsHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	documentIDParam := strings.TrimSpace(r.URL.Query().Get("documentId"))
+
+	if documentIDParam == "" {
+		app.badRequestResponse(w, r, errors.New("documentId is required"))
+		return
+	}
+
+	documentID, err := uuid.Parse(documentIDParam)
+	if err != nil {
+		app.badRequestResponse(w, r, errors.New("invalid documentId"))
+		return
+	}
+
+	conversations, err := app.store.Conversations.GetByDocumentID(ctx, documentID)
+	if err != nil {
+		app.internalServerError(w, r, err)
+		return
+	}
+
+	app.jsonResponse(w, http.StatusOK, map[string]any{
+		"documentId":        documentID.String(),
+		"conversations":     conversations,
+		"conversationCount": len(conversations),
+	})
 }
