@@ -13,7 +13,9 @@ The long-term product vision is RAG-as-a-Service for individuals, teams, and bus
 - Document model for storing upload and processing metadata.
 - Redis-backed Asynq queue for background document processing.
 - Raggo-based text extraction, chunking, and embedding.
+- OpenAI file parsing fallback for PDFs/files that the local parser cannot read.
 - Pgvector-backed `document_chunks` storage.
+- Document-scoped semantic search and streaming answer generation.
 - Basic document classification and summary generation.
 - Webhook idempotency guard to avoid duplicate processing.
 - PostgreSQL/Gorm persistence layer.
@@ -29,8 +31,15 @@ Client
   -> API enqueues document processing task
   -> Redis queue
   -> Worker consumes task
+  -> Raggo/OpenAI extraction fallback
   -> Raggo chunking/embedding pipeline
   -> Postgres/vector storage
+
+Client
+  -> API server search endpoint
+  -> Embed user question
+  -> Pgvector nearest-neighbor search for matching document chunks
+  -> OpenAI streaming answer from retrieved context
 ```
 
 ## Tech Stack
@@ -43,6 +52,7 @@ Client
 - Asynq
 - Cloudinary
 - Raggo
+- OpenAI Go SDK v2
 - Zap logger
 - Validator
 
@@ -52,11 +62,13 @@ Client
 cmd/
   api.go                    HTTP router and application config
   main.go                   API entrypoint
-  documentController.go     Upload and Cloudinary webhook handlers
+  documentController.go     Upload, Cloudinary webhook, and document search handlers
   userController.go         User registration handler
+  service/
+    service.go              Shared Raggo chunker/embedder and OpenAI client setup
   worker/
     main.go                 Worker entrypoint
-    documentProcessor.go    Raggo document processing pipeline
+    documentProcessor.go    Document extraction, chunking, and embedding pipeline
 
 internal/
   db/                       Postgres, Cloudinary, Redis, and Asynq setup
@@ -98,6 +110,7 @@ CLOUDINARY_API_SECRET=<api-secret>
 
 OPENAI_API_KEY=<embedding-api-key>
 OPEN_AI_EMBEDDING_MODEL=text-embedding-3-small
+OPEN_AI_MODEL=gpt-4o-mini
 MODEL_PROVIDER=openai
 ```
 
@@ -136,6 +149,7 @@ GET  /health
 POST /auth/register
 POST /document/upload
 POST /cloudinary/webhook
+POST /document/search
 ```
 
 ## Running The Worker
@@ -149,7 +163,7 @@ go run ./cmd/worker
 The worker currently validates task payloads and reserves the processing points for:
 
 - Fetching the uploaded document from Cloudinary.
-- Extracting readable text.
+- Extracting readable text with Raggo, with OpenAI file parsing as a fallback when local parsing fails.
 - Sending content to Raggo for chunking and embeddings.
 - Storing chunks and pgvector embeddings.
 - Classifying and summarizing the document.
@@ -169,6 +183,37 @@ The worker currently validates task payloads and reserves the processing points 
 9. API queues document processing work.
 10. Worker extracts text, chunks, embeds, saves chunks, and marks the document as `ready`.
 ```
+
+## Document Search Flow
+
+Document search is scoped to one uploaded document. The API embeds the user question with the same embedding setup used for stored chunks, searches `document_chunks` by `document_id` with pgvector cosine distance, and streams an answer from the retrieved context.
+
+```text
+1. Client sends a document ID and question to `/document/search`.
+2. API embeds the question.
+3. API retrieves the top matching chunks for that document from Postgres/pgvector.
+4. API sends the question and retrieved chunks to the configured OpenAI chat model.
+5. API streams answer deltas as server-sent events.
+```
+
+Example request:
+
+```json
+{
+  "documentId": "4429ca47-8053-46c1-bf13-8f0990ca68b8",
+  "query": "Does this law apply to Victoria Island?"
+}
+```
+
+Streaming responses currently emit answer chunks and a completion marker:
+
+```text
+data: {"content":"Yes"}
+data: {"content":", this applies..."}
+data: {"done": true}
+```
+
+If a document has no rows in `document_chunks`, search returns `no_results`; reprocess or reupload the document so extraction, chunking, and embeddings can run.
 
 Supported uploads currently include:
 
@@ -236,7 +281,9 @@ The webhook also has a database-level idempotency guard, so duplicate Cloudinary
 
 Cloudinary PDF delivery must be enabled for local PDF processing. If Cloudinary returns `401` with `x-cld-error: deny or ACL failure`, enable PDF/ZIP delivery in the Cloudinary security settings.
 
-Some PDFs are valid in browsers but fail with the current Go PDF parser. Those documents are marked as `failed` instead of being retried forever. Scanned/image-only PDFs will need OCR support in a future extraction step.
+Some PDFs are valid in browsers but fail with the current Go PDF parser. The worker tries OpenAI file parsing as a fallback; documents are marked as `failed` only if extraction still fails. Scanned/image-only PDFs will need OCR support in a future extraction step.
+
+When local PDF parsing fails, the worker falls back to OpenAI file parsing using the downloaded local file path, then continues through the same chunking, embedding, and storage flow.
 
 ## Product Documents
 
@@ -245,9 +292,8 @@ Some PDFs are valid in browsers but fail with the current Go PDF parser. Those d
 
 ## Roadmap
 
-- Add stronger PDF extraction fallback such as Poppler `pdftotext`.
 - Add OCR for scanned PDFs and images.
 - Add workspace and session models.
 - Add document-level and workspace-level chat.
-- Add citation-aware retrieval.
+- Add richer citation metadata in streamed retrieval answers.
 - Add team roles, permissions, and usage limits.
