@@ -77,6 +77,10 @@ func ExtractTextWithOpenAI(ctx context.Context, filePath string) (string, error)
 	if apiKey == "" {
 		return "", fmt.Errorf("OPENAI_API_KEY is required")
 	}
+	model := env.GetString("OPEN_AI_FILE_EXTRACTION_MODEL", env.GetString("OPEN_AI_MODEL", ""))
+	if model == "" {
+		return "", fmt.Errorf("OPEN_AI_MODEL or OPEN_AI_FILE_EXTRACTION_MODEL is required")
+	}
 
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -95,7 +99,7 @@ func ExtractTextWithOpenAI(ctx context.Context, filePath string) (string, error)
 	}
 
 	resp, err := client.Responses.New(ctx, responses.ResponseNewParams{
-		Model: "gpt-5.5",
+		Model: responses.ResponsesModel(model),
 		Input: responses.ResponseNewParamsInputUnion{
 			OfInputItemList: responses.ResponseInputParam{
 				responses.ResponseInputItemParamOfMessage(

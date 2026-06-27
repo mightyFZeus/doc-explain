@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mightyfzeus/doc-explain/internal/models"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
@@ -53,4 +54,29 @@ func (us *UserStore) UserExistsByID(ctx context.Context, id uuid.UUID) (bool, er
 	}
 
 	return count > 0, nil
+}
+
+func (u *UserStore) LoginUser(ctx context.Context, email, password string) (*models.User, error) {
+	var user models.User
+	err := u.db.WithContext(ctx).Where("email = ?", email).First(&user).Error
+	if err != nil {
+		switch {
+		case err.Error() == "record not found":
+			return nil, ErrUserNotFound
+		default:
+			return nil, err
+		}
+
+	}
+
+	if !checkPassword(password, user.Password) {
+		return nil, errors.New("invalid credentials")
+	}
+
+	return &user, nil
+
+}
+
+func checkPassword(password, hash string) bool {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }

@@ -39,24 +39,42 @@ func (ds *DocumentStore) SaveDocument(ctx context.Context, document models.Docum
 		Create(&document).Error
 }
 
-func (ds *DocumentStore) GetAllDocuments(ctx context.Context) ([]models.Document, error) {
+func (ds *DocumentStore) GetAllDocuments(ctx context.Context, userID uuid.UUID) ([]models.Document, error) {
 	var documents []models.Document
 
 	err := ds.db.WithContext(ctx).
 		Where("deleted_at IS NULL").
+		Where("user_id = ?", userID).
 		Order("created_at DESC").
 		Find(&documents).Error
 
 	return documents, err
 }
 
-func (ds *DocumentStore) DeleteDocument(ctx context.Context, documentID uuid.UUID) error {
+func (ds *DocumentStore) DocumentBelongsToUser(ctx context.Context, documentID uuid.UUID, userID uuid.UUID) (bool, error) {
+	var count int64
+
+	err := ds.db.WithContext(ctx).
+		Model(&models.Document{}).
+		Where("id = ?", documentID).
+		Where("user_id = ?", userID).
+		Where("deleted_at IS NULL").
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+
+	return count > 0, nil
+}
+
+func (ds *DocumentStore) DeleteDocument(ctx context.Context, documentID uuid.UUID, userID uuid.UUID) error {
 	return ds.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var count int64
 		if err := tx.
 			Unscoped().
 			Model(&models.Document{}).
 			Where("id = ?", documentID).
+			Where("user_id = ?", userID).
 			Count(&count).Error; err != nil {
 			return err
 		}
@@ -95,6 +113,7 @@ func (ds *DocumentStore) DeleteDocument(ctx context.Context, documentID uuid.UUI
 		return tx.
 			Unscoped().
 			Where("id = ?", documentID).
+			Where("user_id = ?", userID).
 			Delete(&models.Document{}).Error
 	})
 }
@@ -226,6 +245,7 @@ func (ds *DocumentStore) UpdateDocumentProcessingResult(ctx context.Context, doc
 func (ds *DocumentStore) SearchDocumentChunks(
 	ctx context.Context,
 	documentID uuid.UUID,
+	userID uuid.UUID,
 	queryEmbedding []float64,
 	limit int,
 ) ([]models.RetrievedDocumentChunk, error) {
@@ -246,10 +266,11 @@ func (ds *DocumentStore) SearchDocumentChunks(
 FROM document_chunks
 JOIN documents ON documents.id = document_chunks.document_id
 WHERE document_chunks.document_id = ?
+  AND documents.user_id = ?
   AND documents.deleted_at IS NULL
 ORDER BY distance ASC
 LIMIT ?
-		`, models.Vector(queryEmbedding), documentID, limit).
+		`, models.Vector(queryEmbedding), documentID, userID, limit).
 		Scan(&chunks).Error
 
 	return chunks, err

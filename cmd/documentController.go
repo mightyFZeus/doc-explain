@@ -13,6 +13,7 @@ import (
 
 	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/hibiken/asynq"
 	"github.com/mightyfzeus/doc-explain/cmd/helpers"
 	"github.com/mightyfzeus/doc-explain/internal/dtos"
@@ -23,13 +24,41 @@ import (
 	"github.com/openai/openai-go/v2"
 )
 
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+func (app *application) authenticatedUserID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	user, err := helpers.GetUserFromContext(r.Context())
+	if err != nil {
+		app.logger.Errorw("can't get user from context", "error", err)
+		app.unauthorizedResponse(w, r, err)
+		return uuid.Nil, false
+	}
+
+	userID, err := uuid.Parse(user.UserID)
+	if err != nil {
+		app.logger.Errorw("can't parse user id", "error", err)
+		app.unauthorizedResponse(w, r, errors.New("invalid user id"))
+		return uuid.Nil, false
+	}
+
+	return userID, true
+}
+
 func (app *application) UploadDocumentHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
+	userID, ok := app.authenticatedUserID(w, r)
+	if !ok {
+		return
+	}
 
 	// check size
-	err := r.ParseMultipartForm(10 << 20)
-	if err != nil {
+	err2 := r.ParseMultipartForm(10 << 20)
+	if err2 != nil {
 		app.badRequestResponse(w, r, errors.New("File too large"))
 		return
 	}
@@ -58,16 +87,6 @@ func (app *application) UploadDocumentHandler(w http.ResponseWriter, r *http.Req
 	if !helpers.IsAllowedDocumentUpload(fileName, detectedType) {
 		http.Error(w, "File type not allowed", http.StatusUnsupportedMediaType)
 		return
-	}
-
-	userID := uuid.Nil
-	if value := strings.TrimSpace(r.FormValue("userId")); value != "" {
-		parsedUserID, err := uuid.Parse(value)
-		if err != nil {
-			app.badRequestResponse(w, r, errors.New("invalid userId"))
-			return
-		}
-		userID = parsedUserID
 	}
 
 	title := strings.TrimSpace(r.FormValue("title"))
@@ -134,7 +153,12 @@ func (app *application) UploadDocumentHandler(w http.ResponseWriter, r *http.Req
 func (app *application) GetAllDocumentsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	documents, err := app.store.Documents.GetAllDocuments(ctx)
+	userID, ok := app.authenticatedUserID(w, r)
+	if !ok {
+		return
+	}
+
+	documents, err := app.store.Documents.GetAllDocuments(ctx, userID)
 	if err != nil {
 		app.internalServerError(w, r, err)
 		return
@@ -148,6 +172,11 @@ func (app *application) GetAllDocumentsHandler(w http.ResponseWriter, r *http.Re
 
 func (app *application) DeleteDocumentHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	userID, ok := app.authenticatedUserID(w, r)
+	if !ok {
+		return
+	}
+
 	documentIdStr := r.URL.Query().Get("documentId")
 	if documentIdStr == "" {
 		app.badRequestResponse(w, r, errors.New("documentId is required"))
@@ -160,7 +189,7 @@ func (app *application) DeleteDocumentHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if err := app.store.Documents.DeleteDocument(ctx, documentID); err != nil {
+	if err := app.store.Documents.DeleteDocument(ctx, documentID, userID); err != nil {
 		if errors.Is(err, store.ErrDocumentNotFound) {
 			app.notFoundResponse(w, r, err)
 			return
@@ -282,14 +311,23 @@ func (app *application) CloudinaryUploadWebhook(w http.ResponseWriter, r *http.R
 func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	userID, ok := app.authenticatedUserID(w, r)
+	if !ok {
+		return
+	}
+
 	var payload dtos.SearchDocumentDto
 	if err := helpers.DecodeAndValidate(w, r, &payload); err != nil {
 		return
 	}
 	query := strings.TrimSpace(payload.Query)
 
-	conversation, err := app.store.Conversations.GetOrCreateByDocumentID(ctx, payload.DocumentID)
+	conversation, err := app.store.Conversations.GetOrCreateByDocumentID(ctx, payload.DocumentID, userID)
 	if err != nil {
+		if errors.Is(err, store.ErrDocumentNotFound) {
+			app.notFoundResponse(w, r, err)
+			return
+		}
 		app.internalServerError(w, r, err)
 		return
 	}
@@ -325,6 +363,7 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 	chunks, err := app.store.Documents.SearchDocumentChunks(
 		ctx,
 		payload.DocumentID,
+		userID,
 		queryEmbedding,
 		app.service.TopK,
 	)
@@ -404,6 +443,10 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 
 func (app *application) GetDocumentConversationsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	userID, ok := app.authenticatedUserID(w, r)
+	if !ok {
+		return
+	}
 
 	documentIDParam := strings.TrimSpace(r.URL.Query().Get("documentId"))
 
@@ -418,7 +461,7 @@ func (app *application) GetDocumentConversationsHandler(w http.ResponseWriter, r
 		return
 	}
 
-	conversations, err := app.store.Conversations.GetByDocumentID(ctx, documentID)
+	conversations, err := app.store.Conversations.GetByDocumentID(ctx, documentID, userID)
 	if err != nil {
 		app.internalServerError(w, r, err)
 		return
@@ -429,4 +472,49 @@ func (app *application) GetDocumentConversationsHandler(w http.ResponseWriter, r
 		"conversations":     conversations,
 		"conversationCount": len(conversations),
 	})
+}
+
+func (app *application) DocumentStatusWSHandler(w http.ResponseWriter, r *http.Request) {
+	userID, ok := app.authenticatedUserID(w, r)
+	if !ok {
+		return
+	}
+
+	documentIDParam := r.URL.Query().Get("documentId")
+	if documentIDParam == "" {
+		app.badRequestResponse(w, r, errors.New("documentId is required"))
+		return
+	}
+
+	documentID, err := uuid.Parse(documentIDParam)
+	if err != nil {
+		app.badRequestResponse(w, r, errors.New("invalid documentId"))
+		return
+	}
+
+	belongsToUser, err := app.store.Documents.DocumentBelongsToUser(r.Context(), documentID, userID)
+	if err != nil {
+		app.internalServerError(w, r, err)
+		return
+	}
+	if !belongsToUser {
+		app.notFoundResponse(w, r, store.ErrDocumentNotFound)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		app.logger.Errorw("websocket upgrade failed", "error", err)
+		return
+	}
+	defer conn.Close()
+
+	app.docHub.Add(documentID.String(), conn)
+	defer app.docHub.Delete(documentID.String(), conn)
+
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+	}
 }

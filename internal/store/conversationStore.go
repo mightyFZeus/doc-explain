@@ -16,11 +16,25 @@ type ConversationStore struct {
 func (cs *ConversationStore) GetOrCreateByDocumentID(
 	ctx context.Context,
 	documentID uuid.UUID,
+	userID uuid.UUID,
 ) (models.DocumentConversation, error) {
 	var conversation models.DocumentConversation
+	var count int64
+	if err := cs.db.WithContext(ctx).
+		Model(&models.Document{}).
+		Where("id = ?", documentID).
+		Where("user_id = ?", userID).
+		Where("deleted_at IS NULL").
+		Count(&count).Error; err != nil {
+		return conversation, err
+	}
+	if count == 0 {
+		return conversation, ErrDocumentNotFound
+	}
 
 	err := cs.db.WithContext(ctx).
 		Where("document_id = ?", documentID).
+		Where("user_id = ?", userID).
 		First(&conversation).Error
 
 	if err == nil {
@@ -34,18 +48,21 @@ func (cs *ConversationStore) GetOrCreateByDocumentID(
 	conversation = models.DocumentConversation{
 		ID:         uuid.New(),
 		DocumentID: documentID,
+		UserID:     userID,
 	}
 
 	err = cs.db.WithContext(ctx).Create(&conversation).Error
 	return conversation, err
 }
 
-func (cs *ConversationStore) GetByDocumentID(ctx context.Context, documentID uuid.UUID) ([]models.DocumentConversation, error) {
+func (cs *ConversationStore) GetByDocumentID(ctx context.Context, documentID uuid.UUID, userID uuid.UUID) ([]models.DocumentConversation, error) {
 	var conversations []models.DocumentConversation
 
 	err := cs.db.WithContext(ctx).
 		Joins("JOIN documents ON documents.id = document_conversations.document_id").
 		Where("document_conversations.document_id = ?", documentID).
+		Where("document_conversations.user_id = ?", userID).
+		Where("documents.user_id = ?", userID).
 		Where("documents.deleted_at IS NULL").
 		Preload("Messages", func(db *gorm.DB) *gorm.DB {
 			return db.Order("created_at ASC")

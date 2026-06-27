@@ -10,16 +10,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dlclark/regexp2"
 	"github.com/go-playground/validator/v10"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 	"github.com/mightyfzeus/doc-explain/internal/env"
 	"golang.org/x/crypto/bcrypt"
 )
 
+var passwordRegex = regexp2.MustCompile(`^(?=.*\d)(?=.*[!@#$%^&*()_+{}\[\]:;<>,.?~\\/\-])(?=.*[A-Z])(?=.*[a-z]).{12,}$`, 0)
+
 type contextKey string
 
-const userContextKey = contextKey("user")
+const UserContextKey = contextKey("user")
 
 type UserClaims struct {
 	UserID string `json:"userId"`
@@ -36,6 +38,20 @@ func readJSON(w http.ResponseWriter, r *http.Request, data any) error {
 	decoder.DisallowUnknownFields()
 
 	return decoder.Decode(data)
+}
+
+func writeJSON(w http.ResponseWriter, status int, data any) error {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	return json.NewEncoder(w).Encode(data)
+}
+
+func writeJSONError(w http.ResponseWriter, status int, message string) error {
+	type envelope struct {
+		Error string `json:"error"`
+	}
+
+	return writeJSON(w, status, &envelope{Error: message})
 }
 
 func HashPassword(password string) (string, error) {
@@ -74,12 +90,12 @@ func ValidatePayload(w http.ResponseWriter, r *http.Request, err error) error {
 		}
 
 		// http.Error(w, strings.Join(errorMessages, ", ")), http.StatusBadRequest)
-		http.Error(w, strings.Join(errorMessages, ", "), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, strings.Join(errorMessages, ", "))
 
 		return nil
 	}
+	writeJSONError(w, http.StatusBadRequest, err.Error())
 
-	http.Error(w, err.Error(), http.StatusBadRequest)
 	return err
 }
 
@@ -91,17 +107,20 @@ func DecodeAndValidate(
 
 	if r.Body == nil || r.ContentLength == 0 {
 		err := errors.New("request body must not be empty")
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return err
 	}
 
 	if err := readJSON(w, r, dst); err != nil {
 		if errors.Is(err, io.EOF) {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+
 			return err
 		}
 
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+
 		return err
 	}
 
@@ -114,14 +133,13 @@ func DecodeAndValidate(
 	return nil
 }
 
-func GenerateJWT(userID uuid.UUID, email, name string, role string) (string, error) {
+func GenerateJWT(userID string, email string) (string, error) {
 	secretKey := env.GetString("SECRET_KEY", "")
 
 	jwtSecret := []byte(secretKey)
 	claims := jwt.MapClaims{
 		"userId": userID,
 		"email":  email,
-		"name":   name,
 		"exp":    time.Now().Add(24 * time.Hour).Unix(),
 	}
 
@@ -130,9 +148,18 @@ func GenerateJWT(userID uuid.UUID, email, name string, role string) (string, err
 }
 
 func GetUserFromContext(ctx context.Context) (UserClaims, error) {
-	user, ok := ctx.Value(userContextKey).(UserClaims)
+	user, ok := ctx.Value(UserContextKey).(UserClaims)
 	if !ok {
 		return UserClaims{}, errors.New("user not found in context")
 	}
 	return user, nil
+}
+
+// IsValidPasswordPCRE checks if the password meets strength requirements
+func IsValidPasswordPCRE(password string) bool {
+	match, err := passwordRegex.MatchString(password)
+	if err != nil {
+		return false
+	}
+	return match
 }

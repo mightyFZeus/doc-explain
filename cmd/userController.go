@@ -24,6 +24,12 @@ func (app *application) RegisterUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ok := helpers.IsValidPasswordPCRE(payload.Password)
+	if !ok {
+		app.badRequestResponse(w, r, errors.New("password format not valid"))
+		return
+	}
+
 	hashedPassword, err := helpers.HashPassword(payload.Password)
 	if err != nil {
 		app.logger.Errorf("unable to hash password: %v", err)
@@ -48,5 +54,37 @@ func (app *application) RegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	app.jsonResponse(w, http.StatusCreated, user)
+
+}
+
+func (app *application) LogingHandler(w http.ResponseWriter, r *http.Request) {
+	var payload dtos.LoginDto
+	if err := helpers.DecodeAndValidate(w, r, &payload); err != nil {
+		app.logger.Errorf("can't decode and validate: %v", err)
+		return
+	}
+
+	ctx := r.Context()
+
+	user, err := app.store.Users.LoginUser(ctx, payload.Email, payload.Password)
+	if err != nil {
+		app.logger.Errorf("unable to login user: %v", err)
+		app.badRequestResponse(w, r, err)
+		return
+	}
+
+	token, err := helpers.GenerateJWT(user.Id.String(), user.Email)
+	if err != nil {
+		app.logger.Errorf("unable to generate jwt: %v", err)
+		app.badRequestResponse(w, r, err)
+		return
+	}
+
+	response := dtos.LoginResponse{
+		User:  user,
+		Token: token,
+	}
+
+	app.jsonResponse(w, http.StatusOK, response)
 
 }

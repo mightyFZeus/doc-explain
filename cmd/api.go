@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/hibiken/asynq"
 	"github.com/mightyfzeus/doc-explain/cmd/service"
+	"github.com/mightyfzeus/doc-explain/internal/env"
 	"github.com/mightyfzeus/doc-explain/internal/store"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -27,6 +29,7 @@ type application struct {
 	asynqClient *asynq.Client
 
 	service *service.Service
+	docHub  *service.DocumentStatusHub
 }
 
 type config struct {
@@ -72,15 +75,39 @@ func (app *application) mount() http.Handler {
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
+	secret := env.GetString("SECRET_KEY", "ahjsjj=")
+
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		app.notFoundResponse(w, r, errors.New("route not found"))
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		app.badRequestResponse(w, r, errors.New("method not allowed"))
+	})
+	r.Post("/cloudinary/webhook", app.CloudinaryUploadWebhook)
 
 	r.Get("/health", app.HealthHandler)
-	r.Post("/auth/register", app.RegisterUser)
-	r.Get("/documents", app.GetAllDocumentsHandler)
-	r.Post("/document/upload", app.UploadDocumentHandler)
-	r.Delete("/document", app.DeleteDocumentHandler)
-	r.Post("/cloudinary/webhook", app.CloudinaryUploadWebhook)
-	r.Get("/document/conversations", app.GetDocumentConversationsHandler)
-	r.Post("/document/search", app.SearchThroughDocumentHandler)
+
+	r.Route("/v1/auth", func(r chi.Router) {
+		r.Post("/register", app.RegisterUser)
+
+		r.Post("/login", app.LogingHandler)
+	})
+	r.Route("/v1", func(r chi.Router) {
+		r.Use(
+			app.AuthMiddleware(secret),
+			app.ConcurrencyMiddleware(),
+			app.RateLimitMiddleware(),
+		)
+
+		r.Get("/documents", app.GetAllDocumentsHandler)
+		r.Post("/document/upload", app.UploadDocumentHandler)
+		r.Delete("/document", app.DeleteDocumentHandler)
+		r.Get("/document/conversations", app.GetDocumentConversationsHandler)
+		r.Post("/document/search", app.SearchThroughDocumentHandler)
+
+		r.Get("/ws/document", app.DocumentStatusWSHandler)
+
+	})
 
 	return r
 }

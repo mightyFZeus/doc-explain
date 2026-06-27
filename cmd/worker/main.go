@@ -64,7 +64,13 @@ func main() {
 
 	mux := asynq.NewServeMux()
 
-	processor, err := NewDocumentProcessor(store, logger)
+	redisClient, err := db.ConnectToRedis(redisOpt.Addr, redisOpt.Username, redisOpt.Password, redisOpt.DB)
+	if err != nil {
+		logger.Fatal("failed to connect to redis", zap.Error(err))
+	}
+	defer redisClient.Close()
+
+	processor, err := NewDocumentProcessor(store, logger, redisClient)
 	if err != nil {
 		logger.Fatal("failed to create document processor", zap.Error(err))
 	}

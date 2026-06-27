@@ -9,9 +9,11 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/mightyfzeus/doc-explain/cmd/service"
 	"github.com/mightyfzeus/doc-explain/internal/documentanalysis"
+	"github.com/mightyfzeus/doc-explain/internal/dtos"
 	"github.com/mightyfzeus/doc-explain/internal/jobs"
 	"github.com/mightyfzeus/doc-explain/internal/models"
 	"github.com/mightyfzeus/doc-explain/internal/store"
+	"github.com/redis/go-redis/v9"
 	"github.com/teilomillet/raggo"
 	"go.uber.org/zap"
 )
@@ -24,9 +26,10 @@ type DocumentProcessor struct {
 	embedding      *raggo.EmbeddingService
 	embeddingModel string
 	service        *service.Service
+	redis          *redis.Client
 }
 
-func NewDocumentProcessor(store store.Storage, logger *zap.SugaredLogger) (*DocumentProcessor, error) {
+func NewDocumentProcessor(store store.Storage, logger *zap.SugaredLogger, redis *redis.Client) (*DocumentProcessor, error) {
 	svc, err := service.NewService()
 	if err != nil {
 		logger.Errorf("error", "Failed to create service", err)
@@ -41,6 +44,7 @@ func NewDocumentProcessor(store store.Storage, logger *zap.SugaredLogger) (*Docu
 		chunker:        svc.Chunker,
 		embeddingModel: svc.EmbeddingModel,
 		service:        svc,
+		redis:          redis,
 	}, nil
 }
 
@@ -85,7 +89,7 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 	// parse document content with open ai fallback, if raggo parser fails
 
 	if err != nil {
-		text, err = documentanalysis.ExtractTextWithOpenAI(ctx, payload.SecureURL)
+		text, err = documentanalysis.ExtractTextWithOpenAI(ctx, filePath)
 		if err != nil {
 			if statusErr := p.store.Documents.UpdateDocumentProcessingStatus(ctx, documentID, "failed", "failed", 0); statusErr != nil {
 				return fmt.Errorf("mark document failed after openai parse fallback: %v: original error: %w", statusErr, err)
@@ -186,7 +190,35 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 	}
 	p.logger.Info("created document chunks", zap.Int("count", len(rows)))
 
-	return p.store.Documents.UpdateDocumentProcessingResult(ctx, documentID, "ready", "completed", len(rows), classification, confidence, summary)
+	if err := p.store.Documents.UpdateDocumentProcessingResult(
+		ctx,
+		documentID,
+		"ready",
+		"completed",
+		len(rows),
+		classification,
+		confidence,
+		summary,
+	); err != nil {
+		p.publishDocumentStatus(ctx, dtos.DocumentStatusEvent{
+			DocumentID:       documentID.String(),
+			Status:           "failed",
+			ProcessingStatus: "failed",
+			Error:            err.Error(),
+			UpdatedAt:        time.Now(),
+		})
+		return err
+	}
+
+	p.publishDocumentStatus(ctx, dtos.DocumentStatusEvent{
+		DocumentID:       documentID.String(),
+		Status:           "ready",
+		ProcessingStatus: "completed",
+		ChunkCount:       len(rows),
+		UpdatedAt:        time.Now(),
+	})
+
+	return nil
 }
 
 func (p *DocumentProcessor) embedChunksWithRetry(ctx context.Context, chunks []raggo.Chunk, attempts int) ([]raggo.EmbeddedChunk, error) {
@@ -211,4 +243,16 @@ func (p *DocumentProcessor) embedChunksWithRetry(ctx context.Context, chunks []r
 	}
 
 	return nil, lastErr
+}
+
+func (p *DocumentProcessor) publishDocumentStatus(ctx context.Context, event dtos.DocumentStatusEvent) {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		p.logger.Errorw("failed to marshal document status event", "error", err)
+		return
+	}
+
+	if err := p.redis.Publish(ctx, dtos.DocumentStatusChannel, payload).Err(); err != nil {
+		p.logger.Errorw("failed to publish document status", "error", err)
+	}
 }

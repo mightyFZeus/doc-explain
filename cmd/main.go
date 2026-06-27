@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 
 	"github.com/joho/godotenv"
@@ -84,6 +85,7 @@ func main() {
 	app := &application{
 		config: cfg,
 		logger: logger,
+		docHub: service.NewDocumentStatusHub(),
 		middleWare: middleWareConfig{
 			rateLimiters: make(map[string]*rate.Limiter),
 		},
@@ -96,6 +98,7 @@ func main() {
 	}
 
 	mux := app.mount()
+	go app.ListenForDocumentStatusEvents(context.Background())
 	// go app.EmbedDocuments()
 	logger.Fatal(app.run(mux))
 }
