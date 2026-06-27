@@ -28,7 +28,7 @@ func main() {
 		addr:   ":8080",
 		apiUrl: env.GetString("API_URL", "localhost:8080"),
 		db: dbConfig{
-			dbAddr:       env.GetString("DB_ADDR", "postgres://admin:adminpassword@localhost:5433/doc-explain-db?sslmode=disable"),
+			dbAddr:       env.GetString("DB_ADDR", ""),
 			maxOpenConns: env.GetInt("DB_MAX_OPEN_CONNS", 5),
 			maxIdleConns: env.GetInt("DB_MAX_IDLE_CONNS", 2),
 			maxIdleTime:  env.GetString("DB_MAX_IDLE_TIME", "5m"),
