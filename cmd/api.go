@@ -63,7 +63,7 @@ func (app *application) mount() http.Handler {
 
 	origins := []string{
 		"http://localhost:3000",
-		"https://doc-explain.onrender.com",
+		"https://doc-explain.vercel.app",
 	}
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
