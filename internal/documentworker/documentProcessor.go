@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/cloudinary/cloudinary-go/v2"
+	"github.com/cloudinary/cloudinary-go/v2/api/uploader"
+	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 	svcservice "github.com/mightyfzeus/doc-explain/cmd/service"
 	"github.com/mightyfzeus/doc-explain/internal/documentanalysis"
 	"github.com/mightyfzeus/doc-explain/internal/dtos"
+	"github.com/mightyfzeus/doc-explain/internal/env"
 	"github.com/mightyfzeus/doc-explain/internal/jobs"
 	"github.com/mightyfzeus/doc-explain/internal/models"
 	"github.com/mightyfzeus/doc-explain/internal/store"
@@ -27,9 +32,10 @@ type DocumentProcessor struct {
 	embeddingModel string
 	service        *svcservice.Service
 	redis          *redis.Client
+	cloudinary     *cloudinary.Cloudinary
 }
 
-func NewDocumentProcessor(store store.Storage, logger *zap.SugaredLogger, redis *redis.Client, svc *svcservice.Service) (*DocumentProcessor, error) {
+func NewDocumentProcessor(store store.Storage, logger *zap.SugaredLogger, redis *redis.Client, svc *svcservice.Service, cld *cloudinary.Cloudinary) (*DocumentProcessor, error) {
 	if svc == nil {
 		var err error
 		svc, err = svcservice.NewService()
@@ -39,20 +45,34 @@ func NewDocumentProcessor(store store.Storage, logger *zap.SugaredLogger, redis 
 		}
 	}
 
+	loaderTimeoutMinutes := env.GetInt("DOCUMENT_LOADER_TIMEOUT_MINUTES", 15)
+	if loaderTimeoutMinutes <= 0 {
+		loaderTimeoutMinutes = 15
+	}
+
 	return &DocumentProcessor{
 		store:          store,
 		logger:         logger,
-		loader:         raggo.NewLoader(raggo.SetLoaderTimeout(5 * time.Minute)),
+		loader:         raggo.NewLoader(raggo.SetLoaderTimeout(time.Duration(loaderTimeoutMinutes) * time.Minute)),
 		embedding:      svc.Embedder,
 		chunker:        svc.Chunker,
 		embeddingModel: svc.EmbeddingModel,
 		service:        svc,
 		redis:          redis,
+		cloudinary:     cld,
 	}, nil
 }
 
-func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) error {
+func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) (err error) {
 	var payload jobs.ProcessDocumentPayload
+	var documentID uuid.UUID
+
+	defer func() {
+		if err == nil || documentID == uuid.Nil {
+			return
+		}
+		p.markDocumentFailed(documentID, err)
+	}()
 
 	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 		return fmt.Errorf("invalid process document payload: %w: %v", asynq.SkipRetry, err)
@@ -74,10 +94,18 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 		return fmt.Errorf("secureUrl is required: %w", asynq.SkipRetry)
 	}
 
-	documentID, err := documentanalysis.DocumentIDFromPayload(payload.DocumentID)
+	documentID, err = documentanalysis.DocumentIDFromPayload(payload.DocumentID)
 	if err != nil {
 		return fmt.Errorf("invalid document id: %w: %v", asynq.SkipRetry, err)
 	}
+
+	p.logger.Infow("document processing started",
+		"documentId", documentID.String(),
+		"publicId", payload.PublicID,
+		"format", payload.Format,
+		"bytes", payload.Bytes,
+		"pages", payload.Pages,
+	)
 
 	documentRecord, err := p.store.Documents.GetDocumentByID(ctx, documentID)
 	if err != nil {
@@ -96,6 +124,7 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 	if err != nil {
 		return fmt.Errorf("load cloudinary document: %w", err)
 	}
+	p.logger.Infow("document loaded from cloudinary", "documentId", documentID.String(), "filePath", filePath)
 
 	document, err := parser.Parse(filePath)
 	var text string
@@ -103,36 +132,35 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 	if err != nil {
 		text, err = documentanalysis.ExtractTextWithOpenAI(ctx, filePath)
 		if err != nil {
-			if statusErr := p.store.Documents.UpdateDocumentProcessingStatus(ctx, documentID, "failed", "failed", 0); statusErr != nil {
-				return fmt.Errorf("mark document failed after openai parse fallback: %v: original error: %w", statusErr, err)
-			}
 			return fmt.Errorf("parse document with openai fallback: %w: %v", asynq.SkipRetry, err)
 		}
 	} else {
 		text = document.Content
 	}
 	if err != nil {
-		if statusErr := p.store.Documents.UpdateDocumentProcessingStatus(ctx, documentID, "failed", "failed", 0); statusErr != nil {
-			return fmt.Errorf("mark document failed after parse error: %v: original error: %w", statusErr, err)
-		}
 		return fmt.Errorf("parse document: %w: %v", asynq.SkipRetry, err)
 	}
+	p.logger.Infow("document text extracted", "documentId", documentID.String(), "characters", len(text))
 
 	classification, confidence := documentanalysis.ClassifyDocument(text)
 	summary := documentanalysis.SummarizeDocument(text)
 
 	chunks := p.chunker.Chunk(text)
 	if len(chunks) == 0 {
-		if statusErr := p.store.Documents.UpdateDocumentProcessingStatus(ctx, documentID, "failed", "failed", 0); statusErr != nil {
-			return fmt.Errorf("mark document failed after empty chunks: %w", statusErr)
-		}
 		return fmt.Errorf("no chunks produced for document %s: %w", payload.DocumentID, asynq.SkipRetry)
+	}
+	p.logger.Infow("document chunked", "documentId", documentID.String(), "chunkCount", len(chunks))
+
+	maxChunks := env.GetInt("DOCUMENT_MAX_CHUNKS", 600)
+	if maxChunks > 0 && len(chunks) > maxChunks {
+		return fmt.Errorf("document produced %d chunks, above max %d: %w", len(chunks), maxChunks, asynq.SkipRetry)
 	}
 
 	embeddedChunks, err := p.embedChunksWithRetry(ctx, chunks, 3)
 	if err != nil {
 		return fmt.Errorf("embed document chunks: %w", err)
 	}
+	p.logger.Infow("document chunks embedded", "documentId", documentID.String(), "chunkCount", len(embeddedChunks))
 
 	if len(chunks) != len(embeddedChunks) {
 		return fmt.Errorf("chunk count mismatch: chunks=%d embedded_chunks=%d", len(chunks), len(embeddedChunks))
@@ -260,8 +288,72 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 		ChunkCount:       len(rows),
 		UpdatedAt:        time.Now(),
 	})
+	p.deleteCloudinaryOriginal(ctx, payload)
 
 	return nil
+}
+
+func (p *DocumentProcessor) markDocumentFailed(documentID uuid.UUID, processingErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errMessage := processingErr.Error()
+	if statusErr := p.store.Documents.UpdateDocumentProcessingStatus(ctx, documentID, "failed", "failed", 0); statusErr != nil {
+		p.logger.Errorw("failed to mark document as failed",
+			"documentId", documentID.String(),
+			"processingError", errMessage,
+			"statusError", statusErr,
+		)
+		return
+	}
+
+	p.logger.Errorw("document processing failed",
+		"documentId", documentID.String(),
+		"error", errMessage,
+	)
+
+	p.publishDocumentStatus(ctx, dtos.DocumentStatusEvent{
+		DocumentID:       documentID.String(),
+		Status:           "failed",
+		ProcessingStatus: "failed",
+		Error:            errMessage,
+		UpdatedAt:        time.Now(),
+	})
+}
+
+func (p *DocumentProcessor) deleteCloudinaryOriginal(ctx context.Context, payload jobs.ProcessDocumentPayload) {
+	if p.cloudinary == nil {
+		p.logger.Warnw("cloudinary client unavailable; original document was not deleted", "documentId", payload.DocumentID)
+		return
+	}
+
+	resourceType := strings.TrimSpace(payload.ResourceType)
+	if resourceType == "" {
+		resourceType = "raw"
+	}
+
+	invalidate := true
+	result, err := p.cloudinary.Upload.Destroy(ctx, uploader.DestroyParams{
+		PublicID:     payload.PublicID,
+		ResourceType: resourceType,
+		Invalidate:   &invalidate,
+	})
+	if err != nil {
+		p.logger.Errorw("failed to delete original document from cloudinary",
+			"documentId", payload.DocumentID,
+			"publicId", payload.PublicID,
+			"resourceType", resourceType,
+			"error", err,
+		)
+		return
+	}
+
+	p.logger.Infow("deleted original document from cloudinary",
+		"documentId", payload.DocumentID,
+		"publicId", payload.PublicID,
+		"resourceType", resourceType,
+		"result", result.Result,
+	)
 }
 
 func (p *DocumentProcessor) embedChunksWithRetry(ctx context.Context, chunks []raggo.Chunk, attempts int) ([]raggo.EmbeddedChunk, error) {

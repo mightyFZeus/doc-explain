@@ -13,6 +13,10 @@ func (app *application) badRequestResponse(w http.ResponseWriter, r *http.Reques
 	app.logger.Warnf("bad request", "method", r.Method, "path", r.URL.Path, "error", err.Error())
 	writeJSONError(w, http.StatusBadRequest, err.Error())
 }
+func (app *application) fileTooLargeResponse(w http.ResponseWriter, r *http.Request, err error) {
+	app.logger.Warnf("file too large", "method", r.Method, "path", r.URL.Path, "error", err.Error())
+	writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
+}
 
 func (app *application) notFoundResponse(w http.ResponseWriter, r *http.Request, err error) {
 	app.logger.Warnf("Not found", "method", r.Method, "path", r.URL.Path, "error", err.Error())

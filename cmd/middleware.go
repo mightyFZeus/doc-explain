@@ -132,6 +132,11 @@ func (app *application) getRateLimiter(userID string) *rate.Limiter {
 func (app *application) RateLimitMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isWebSocketRequest(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			userCtx := r.Context().Value(helpers.UserContextKey)
 			if userCtx == nil {
 				app.unauthorizedResponse(w, r, errors.New("user not authenticated"))

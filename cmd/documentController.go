@@ -33,6 +33,9 @@ var upgrader = websocket.Upgrader{
 const (
 	guestDocumentUploadLimit = 1
 	guestQuestionLimit       = 5
+	wsPongWait               = 70 * time.Second
+	wsPingPeriod             = 25 * time.Second
+	wsWriteWait              = 10 * time.Second
 )
 
 func (app *application) authenticatedUserID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
@@ -81,6 +84,15 @@ func (app *application) UploadDocumentHandler(w http.ResponseWriter, r *http.Req
 	ctx := r.Context()
 	user, userID, ok := app.authenticatedUser(w, r)
 	if !ok {
+		return
+	}
+
+	const maxUploadSize = 20 << 20 // 20MB
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+
+	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+		app.fileTooLargeResponse(w, r, errors.New("file too large"))
 		return
 	}
 
@@ -146,7 +158,7 @@ func (app *application) UploadDocumentHandler(w http.ResponseWriter, r *http.Req
 	// upload to cloudinary
 	uploadResult, err := app.cld.Upload.Upload(ctx, file, uploader.UploadParams{
 		Folder:       "documents",
-		ResourceType: "auto",
+		ResourceType: "raw",
 		PublicID:     documentID.String(),
 	})
 	if err != nil {
@@ -331,6 +343,7 @@ func (app *application) CloudinaryUploadWebhook(w http.ResponseWriter, r *http.R
 		AssetID:          payload.AssetID,
 		PublicID:         payload.PublicID,
 		SecureURL:        payload.SecureURL,
+		ResourceType:     payload.ResourceType,
 		Format:           payload.Format,
 		OriginalFilename: payload.OriginalFilename,
 		Bytes:            int64(payload.Bytes),
@@ -377,6 +390,7 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 		return
 	}
 	query := strings.TrimSpace(payload.Query)
+	isDraftingQuery := helpers.IsDocumentDraftingQuery(query)
 
 	if user.AccountType == models.AccountTypeGuest {
 		questionCount, err := app.store.Conversations.CountUserMessagesByUserID(ctx, userID)
@@ -406,11 +420,14 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 		return
 	}
 
-	standaloneQuery, err := helpers.RewriteQueryForRetrieval(ctx, query, history)
-	if err != nil {
-		app.logger.Errorf("error", "Failed to rewrite query", err)
-		app.internalServerError(w, r, err)
-		return
+	standaloneQuery := query
+	if !isDraftingQuery {
+		standaloneQuery, err = helpers.RewriteQueryForRetrieval(ctx, query, history)
+		if err != nil {
+			app.logger.Errorf("error", "Failed to rewrite query", err)
+			app.internalServerError(w, r, err)
+			return
+		}
 	}
 	if err := app.store.Conversations.CreateMessage(ctx, models.DocumentMessage{
 		ConversationID: conversation.ID,
@@ -429,19 +446,24 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 		ConversationID: &conversation.ID,
 	})
 
-	queryEmbedding, err := app.service.Embedder.Embed(ctx, standaloneQuery)
-	if err != nil {
-		app.logger.Errorw("error", "Failed to embed query", err)
-		app.internalServerError(w, r, err)
-		return
+	var chunks []models.RetrievedDocumentChunk
+	if isDraftingQuery {
+		chunks, err = app.store.Documents.ListDocumentChunks(ctx, payload.DocumentID, userID, 80)
+	} else {
+		queryEmbedding, err := app.service.Embedder.Embed(ctx, standaloneQuery)
+		if err != nil {
+			app.logger.Errorw("error", "Failed to embed query", err)
+			app.internalServerError(w, r, err)
+			return
+		}
+		chunks, err = app.store.Documents.SearchDocumentChunks(
+			ctx,
+			payload.DocumentID,
+			userID,
+			queryEmbedding,
+			app.service.TopK,
+		)
 	}
-	chunks, err := app.store.Documents.SearchDocumentChunks(
-		ctx,
-		payload.DocumentID,
-		userID,
-		queryEmbedding,
-		app.service.TopK,
-	)
 	if err != nil {
 		app.logger.Errorw("error", "Failed to search document chunks", err)
 		app.internalServerError(w, r, err)
@@ -461,8 +483,20 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 			return
 		}
 	}
+	document, err := app.store.Documents.GetDocumentByID(ctx, payload.DocumentID)
+	if err != nil {
+		app.logger.Errorw("error", "Failed to get document", err)
+		app.internalServerError(w, r, err)
+		return
+	}
 	contextText := helpers.FormatChunksForPrompt(chunks)
-	prompt := helpers.GetPrompt(history, contextText, query)
+	if isDraftingQuery {
+		candidateProfile := helpers.FormatCandidateProfileForPrompt(chunks)
+		if candidateProfile != "" {
+			contextText = candidateProfile + "\n\n" + contextText
+		}
+	}
+	prompt := helpers.GetPrompt(history, contextText, query, helpers.IsLegalDocument(document))
 
 	// Set headers  streaming
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -595,9 +629,44 @@ func (app *application) DocumentStatusWSHandler(w http.ResponseWriter, r *http.R
 	app.docHub.Add(documentID.String(), conn)
 	defer app.docHub.Delete(documentID.String(), conn)
 
+	app.logger.Infow("document status websocket connected",
+		"documentId", documentID.String(),
+		"userId", userID.String(),
+	)
+	defer app.logger.Infow("document status websocket disconnected",
+		"documentId", documentID.String(),
+		"userId", userID.String(),
+	)
+
+	conn.SetReadLimit(1024)
+	_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(wsPingPeriod)
+	defer ticker.Stop()
+
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
+		select {
+		case <-done:
 			return
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+				return
+			}
 		}
 	}
 }

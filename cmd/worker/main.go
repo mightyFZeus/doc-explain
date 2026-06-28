@@ -46,6 +46,7 @@ func main() {
 		logger.Fatal("failed to connect to database", zap.Error(err))
 	}
 	store := store.NewStorage(gormDB)
+	cld, _ := db.InitCloudinary()
 
 	redisClient, err := db.ConnectToRedis(redisOpt.Addr, redisOpt.Username, redisOpt.Password, redisOpt.DB)
 	if err != nil {
@@ -59,6 +60,7 @@ func main() {
 		Store:       store,
 		Logger:      logger,
 		Redis:       redisClient,
+		Cloudinary:  cld,
 		Concurrency: concurrency,
 	}); err != nil {
 		log.Fatal(err)

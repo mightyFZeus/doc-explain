@@ -10,7 +10,7 @@ The long-term product vision is RAG-as-a-Service for individuals, teams, and bus
 - JWT-authenticated document APIs.
 - Guest trial sessions for testing without signup.
 - User-scoped document upload, retrieval, search, conversations, and deletion.
-- Cloudinary integration for file storage.
+- Cloudinary integration for temporary upload ingestion.
 - Cloudinary upload webhook verification.
 - Document model for storing upload and processing metadata.
 - Redis-backed Asynq queue for background document processing.
@@ -125,6 +125,9 @@ REDIS_DB=0
 
 PROCESS_JOBS_IN_API=true
 DOCUMENT_WORKER_CONCURRENCY=10
+DOCUMENT_PROCESSING_TIMEOUT_MINUTES=120
+DOCUMENT_LOADER_TIMEOUT_MINUTES=15
+DOCUMENT_MAX_CHUNKS=600
 
 CLOUDINARY_URL=cloudinary://<api-key>:<api-secret>@<cloud-name>
 CLOUDINARY_API_SECRET=<api-secret>
@@ -215,7 +218,7 @@ go run ./cmd/worker
 
 The queue consumer validates task payloads and handles:
 
-- Fetching the uploaded document from Cloudinary.
+- Fetching the temporary uploaded document from Cloudinary.
 - Extracting readable text with Raggo, with OpenAI file parsing as a fallback when local parsing fails.
 - Sending content to Raggo for chunking and embeddings.
 - Storing chunks and pgvector embeddings.
@@ -228,13 +231,13 @@ The queue consumer validates task payloads and handles:
 1. Authenticated user uploads a supported file.
 2. API validates file size, MIME type, and extension.
 3. API reads the user from JWT context.
-4. API uploads the file to Cloudinary using a generated document UUID.
+4. API uploads the file temporarily to Cloudinary using a generated document UUID.
 5. API creates a user-owned `documents` row with `uploaded` status.
 6. Cloudinary sends an upload webhook.
 7. API verifies the webhook signature and timestamp.
 8. API marks the document as `processing` if it is not already processing/completed.
 9. API queues document processing work.
-10. Worker extracts text, chunks, embeds, encrypts chunk text, saves chunks, and marks the document as `ready`.
+10. Worker extracts text, chunks, embeds, encrypts chunk text, saves chunks, marks the document as `ready`, and deletes the original Cloudinary asset.
 ```
 
 ## Document Search Flow

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -15,16 +16,25 @@ import (
 	"github.com/teilomillet/raggo"
 )
 
+var (
+	emailPattern = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
+	phonePattern = regexp.MustCompile(`(?:\+?\d[\d\s().-]{7,}\d)`)
+)
+
 func ClassifyDocument(text string) (string, float64) {
 	lower := strings.ToLower(text)
+	resumeScore := resumeClassificationScore(text, lower)
+	if resumeScore >= 5 {
+		return "resume", confidenceFromScore(resumeScore)
+	}
 
 	scores := map[string]int{
-		"resume":      countMatches(lower, "profile summary", "employment history", "skills", "education", "certifications", "linkedin", "resume", "cv"),
-		"legal":       countMatches(lower, "agreement", "party", "parties", "clause", "terms and conditions", "governing law", "liability"),
+		"resume":      resumeScore,
+		"legal":       countMatches(lower, "agreement", "party", "parties", "clause", "section", "subsection", "law", "act", "regulation", "court", "jurisdiction", "terms and conditions", "governing law", "liability"),
 		"research":    countMatches(lower, "abstract", "methodology", "references", "literature review", "findings", "conclusion"),
 		"financial":   countMatches(lower, "balance sheet", "income statement", "cash flow", "revenue", "profit", "expenses", "assets"),
 		"educational": countMatches(lower, "lesson", "course", "assignment", "curriculum", "learning objectives", "student"),
-		"technical":   countMatches(lower, "api", "architecture", "database", "deployment", "authentication", "backend", "frontend"),
+		"technical":   countMatches(lower, "api", "architecture", "database", "deployment", "authentication", "backend", "frontend", "system design", "infrastructure"),
 	}
 
 	bestClass := "general"
@@ -40,12 +50,7 @@ func ClassifyDocument(text string) (string, float64) {
 		return bestClass, 0.50
 	}
 
-	confidence := 0.60 + float64(bestScore)*0.08
-	if confidence > 0.95 {
-		confidence = 0.95
-	}
-
-	return bestClass, confidence
+	return bestClass, confidenceFromScore(bestScore)
 }
 
 func SummarizeDocument(text string) string {
@@ -70,6 +75,62 @@ func countMatches(text string, keywords ...string) int {
 		}
 	}
 	return count
+}
+
+func resumeClassificationScore(original string, lower string) int {
+	score := 0
+
+	if emailPattern.MatchString(original) {
+		score += 3
+	}
+	if phonePattern.MatchString(original) {
+		score += 2
+	}
+
+	score += countMatches(lower,
+		"curriculum vitae",
+		"resume",
+		"cv",
+		"profile summary",
+		"professional summary",
+		"career summary",
+		"work experience",
+		"professional experience",
+		"employment history",
+		"employment experience",
+		"experience",
+		"education",
+		"technical skills",
+		"skills",
+		"certifications",
+		"projects",
+		"portfolio",
+		"linkedin",
+		"github",
+		"references",
+	)
+
+	score += countMatches(lower,
+		"software engineer",
+		"product engineer",
+		"backend engineer",
+		"frontend engineer",
+		"mobile engineer",
+		"full stack",
+		"developer",
+		"react native",
+		"golang",
+	)
+
+	return score
+}
+
+func confidenceFromScore(score int) float64 {
+	confidence := 0.60 + float64(score)*0.05
+	if confidence > 0.95 {
+		return 0.95
+	}
+	return confidence
 }
 
 func ExtractTextWithOpenAI(ctx context.Context, filePath string) (string, error) {

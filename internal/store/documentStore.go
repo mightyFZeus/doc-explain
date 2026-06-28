@@ -306,3 +306,36 @@ LIMIT ?
 
 	return chunks, err
 }
+
+func (ds *DocumentStore) ListDocumentChunks(
+	ctx context.Context,
+	documentID uuid.UUID,
+	userID uuid.UUID,
+	limit int,
+) ([]models.RetrievedDocumentChunk, error) {
+	if limit <= 0 {
+		limit = 80
+	}
+
+	var chunks []models.RetrievedDocumentChunk
+
+	err := ds.db.WithContext(ctx).
+		Raw(`
+SELECT
+    document_chunks.document_id,
+    document_chunks.chunk_index,
+    document_chunks.content,
+    document_chunks.metadata,
+    0::float8 AS distance
+FROM document_chunks
+JOIN documents ON documents.id = document_chunks.document_id
+WHERE document_chunks.document_id = ?
+  AND documents.user_id = ?
+  AND documents.deleted_at IS NULL
+ORDER BY document_chunks.chunk_index ASC
+LIMIT ?
+		`, documentID, userID, limit).
+		Scan(&chunks).Error
+
+	return chunks, err
+}

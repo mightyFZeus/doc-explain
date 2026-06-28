@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/cloudinary/cloudinary-go/v2"
 	"github.com/hibiken/asynq"
 	svcservice "github.com/mightyfzeus/doc-explain/cmd/service"
 	"github.com/mightyfzeus/doc-explain/internal/jobs"
@@ -20,6 +21,7 @@ type Config struct {
 	Logger      *zap.SugaredLogger
 	Redis       *redis.Client
 	Service     *svcservice.Service
+	Cloudinary  *cloudinary.Cloudinary
 	Concurrency int
 }
 
@@ -51,7 +53,7 @@ func Run(ctx context.Context, cfg Config) error {
 		}),
 	})
 
-	processor, err := NewDocumentProcessor(cfg.Store, cfg.Logger, cfg.Redis, cfg.Service)
+	processor, err := NewDocumentProcessor(cfg.Store, cfg.Logger, cfg.Redis, cfg.Service, cfg.Cloudinary)
 	if err != nil {
 		return err
 	}

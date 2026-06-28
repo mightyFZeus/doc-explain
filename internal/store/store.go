@@ -42,6 +42,7 @@ type Storage struct {
 			queryEmbedding []float64,
 			limit int,
 		) ([]models.RetrievedDocumentChunk, error)
+		ListDocumentChunks(ctx context.Context, documentID uuid.UUID, userID uuid.UUID, limit int) ([]models.RetrievedDocumentChunk, error)
 	}
 	Conversations interface {
 		GetOrCreateByDocumentID(ctx context.Context, documentID uuid.UUID, userID uuid.UUID) (models.DocumentConversation, error)

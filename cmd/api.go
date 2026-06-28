@@ -70,7 +70,7 @@ func (app *application) mount() http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	r.Use(timeoutExceptWebSocket(60 * time.Second))
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   origins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"},
@@ -114,6 +114,21 @@ func (app *application) mount() http.Handler {
 	})
 
 	return r
+}
+
+func timeoutExceptWebSocket(timeout time.Duration) func(http.Handler) http.Handler {
+	timeoutMiddleware := middleware.Timeout(timeout)
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isWebSocketRequest(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			timeoutMiddleware(next).ServeHTTP(w, r)
+		})
+	}
 }
 
 func (app *application) run(mux http.Handler) error {

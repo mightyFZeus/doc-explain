@@ -116,6 +116,7 @@ func main() {
 				Logger:      logger,
 				Redis:       redis,
 				Service:     svc,
+				Cloudinary:  cld,
 				Concurrency: concurrency,
 			}); err != nil {
 				logger.Errorw("document queue runner stopped", "error", err)
