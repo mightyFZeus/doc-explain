@@ -63,6 +63,7 @@ func (app *application) mount() http.Handler {
 
 	origins := []string{
 		"http://localhost:3000",
+		"https://doc-explain.onrender.com",
 	}
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
