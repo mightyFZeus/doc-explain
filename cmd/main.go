@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"log"
+	"strings"
 
+	"github.com/hibiken/asynq"
 	"github.com/joho/godotenv"
 	"github.com/mightyfzeus/doc-explain/cmd/service"
 	"github.com/mightyfzeus/doc-explain/internal/db"
+	"github.com/mightyfzeus/doc-explain/internal/documentworker"
 	"github.com/mightyfzeus/doc-explain/internal/env"
 	"github.com/mightyfzeus/doc-explain/internal/store"
 	"go.uber.org/zap"
@@ -21,11 +24,11 @@ func main() {
 	addr := env.GetString("ADDR", "")
 	if addr == "" {
 		port := env.GetString("PORT", "8080")
-		addr = port
+		addr = ":" + strings.TrimPrefix(port, ":")
 	}
 
 	cfg := config{
-		addr:   ":8080",
+		addr:   addr,
 		apiUrl: env.GetString("API_URL", "localhost:8080"),
 		db: dbConfig{
 			dbAddr:       env.GetString("DB_ADDR", ""),
@@ -35,7 +38,7 @@ func main() {
 		},
 		env: env.GetString("ENV", "development"),
 		redis: redisConfig{
-			url:      env.GetString("REDIS_URL", "redis://localhost:6379"),
+			url:      env.GetString("REDIS_URL", "localhost:6379"),
 			password: env.GetString("REDIS_PASSWORD", ""),
 			db:       env.GetInt("REDIS_DB", 0),
 			username: env.GetString("REDIS_USERNAME", ""),
@@ -99,6 +102,26 @@ func main() {
 
 	mux := app.mount()
 	go app.ListenForDocumentStatusEvents(context.Background())
+	if env.GetBool("PROCESS_JOBS_IN_API", true) {
+		concurrency := env.GetInt("DOCUMENT_WORKER_CONCURRENCY", documentworker.DefaultConcurrency)
+		go func() {
+			if err := documentworker.Run(context.Background(), documentworker.Config{
+				RedisOpt: asynq.RedisClientOpt{
+					Addr:     cfg.redis.url,
+					Username: cfg.redis.username,
+					Password: cfg.redis.password,
+					DB:       cfg.redis.db,
+				},
+				Store:       store,
+				Logger:      logger,
+				Redis:       redis,
+				Service:     svc,
+				Concurrency: concurrency,
+			}); err != nil {
+				logger.Errorw("document queue runner stopped", "error", err)
+			}
+		}()
+	}
 	// go app.EmbedDocuments()
 	logger.Fatal(app.run(mux))
 }

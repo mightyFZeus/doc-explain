@@ -20,5 +20,13 @@ func (app *application) ListenForDocumentStatusEvents(ctx context.Context) {
 		}
 
 		app.docHub.Broadcast(event)
+		if event.ProcessingStatus == "completed" {
+			app.logger.Infow("document processing status broadcasted",
+				"documentId", event.DocumentID,
+				"status", event.Status,
+				"processingStatus", event.ProcessingStatus,
+				"chunkCount", event.ChunkCount,
+			)
+		}
 	}
 }

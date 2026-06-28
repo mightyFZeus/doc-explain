@@ -7,8 +7,8 @@ import (
 	"github.com/hibiken/asynq"
 	"github.com/joho/godotenv"
 	"github.com/mightyfzeus/doc-explain/internal/db"
+	"github.com/mightyfzeus/doc-explain/internal/documentworker"
 	"github.com/mightyfzeus/doc-explain/internal/env"
-	"github.com/mightyfzeus/doc-explain/internal/jobs"
 	"github.com/mightyfzeus/doc-explain/internal/store"
 	"go.uber.org/zap"
 )
@@ -32,21 +32,6 @@ func main() {
 		DB:       env.GetInt("REDIS_DB", 0),
 	}
 	logger := zap.Must(zap.NewProduction()).Sugar()
-
-	server := asynq.NewServer(redisOpt, asynq.Config{
-		Concurrency: 3,
-		Queues: map[string]int{
-			"rag":     10,
-			"default": 1,
-		},
-		ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
-			logger.Errorw("asynq task failed",
-				"type", task.Type(),
-				"payload", string(task.Payload()),
-				"error", err,
-			)
-		}),
-	})
 	// logger
 	defer logger.Sync()
 	// db
@@ -62,31 +47,20 @@ func main() {
 	}
 	store := store.NewStorage(gormDB)
 
-	mux := asynq.NewServeMux()
-
 	redisClient, err := db.ConnectToRedis(redisOpt.Addr, redisOpt.Username, redisOpt.Password, redisOpt.DB)
 	if err != nil {
 		logger.Fatal("failed to connect to redis", zap.Error(err))
 	}
 	defer redisClient.Close()
 
-	processor, err := NewDocumentProcessor(store, logger, redisClient)
-	if err != nil {
-		logger.Fatal("failed to create document processor", zap.Error(err))
-	}
-	encryptedChunks, err := store.Documents.EncryptPlaintextChunks(context.Background(), processor.service.ChunkCipher.Encrypt)
-	if err != nil {
-		logger.Fatal("failed to encrypt plaintext chunks", zap.Error(err))
-	}
-	if encryptedChunks > 0 {
-		logger.Infow("encrypted plaintext chunks", "count", encryptedChunks)
-	}
-	mux.Handle(jobs.TypeProcessDocument, processor)
-	// start server
-	logger.Info("server is running")
-	defer server.Shutdown()
-
-	if err := server.Run(mux); err != nil {
+	concurrency := env.GetInt("DOCUMENT_WORKER_CONCURRENCY", documentworker.DefaultConcurrency)
+	if err := documentworker.Run(context.Background(), documentworker.Config{
+		RedisOpt:    redisOpt,
+		Store:       store,
+		Logger:      logger,
+		Redis:       redisClient,
+		Concurrency: concurrency,
+	}); err != nil {
 		log.Fatal(err)
 	}
 }

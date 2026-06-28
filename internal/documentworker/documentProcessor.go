@@ -1,4 +1,4 @@
-package main
+package documentworker
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
-	"github.com/mightyfzeus/doc-explain/cmd/service"
+	svcservice "github.com/mightyfzeus/doc-explain/cmd/service"
 	"github.com/mightyfzeus/doc-explain/internal/documentanalysis"
 	"github.com/mightyfzeus/doc-explain/internal/dtos"
 	"github.com/mightyfzeus/doc-explain/internal/jobs"
@@ -25,15 +25,18 @@ type DocumentProcessor struct {
 	chunker        raggo.Chunker
 	embedding      *raggo.EmbeddingService
 	embeddingModel string
-	service        *service.Service
+	service        *svcservice.Service
 	redis          *redis.Client
 }
 
-func NewDocumentProcessor(store store.Storage, logger *zap.SugaredLogger, redis *redis.Client) (*DocumentProcessor, error) {
-	svc, err := service.NewService()
-	if err != nil {
-		logger.Errorf("error", "Failed to create service", err)
-		return nil, err
+func NewDocumentProcessor(store store.Storage, logger *zap.SugaredLogger, redis *redis.Client, svc *svcservice.Service) (*DocumentProcessor, error) {
+	if svc == nil {
+		var err error
+		svc, err = svcservice.NewService()
+		if err != nil {
+			logger.Errorf("error", "Failed to create service", err)
+			return nil, err
+		}
 	}
 
 	return &DocumentProcessor{
@@ -76,9 +79,19 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 		return fmt.Errorf("invalid document id: %w: %v", asynq.SkipRetry, err)
 	}
 
+	documentRecord, err := p.store.Documents.GetDocumentByID(ctx, documentID)
+	if err != nil {
+		return fmt.Errorf("get document before processing: %w", err)
+	}
+
+	documentOwner, err := p.store.Users.GetByID(ctx, documentRecord.UserID)
+	if err != nil {
+		return fmt.Errorf("get document owner before processing: %w", err)
+	}
+	actorType := models.ActorTypeForAccount(documentOwner.AccountType)
+
 	parser := documentanalysis.ParserForPayload(payload)
 
-	// TODO: Get the document from cloudinary
 	filePath, err := p.loader.LoadURL(ctx, payload.SecureURL)
 	if err != nil {
 		return fmt.Errorf("load cloudinary document: %w", err)
@@ -86,7 +99,6 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 
 	document, err := parser.Parse(filePath)
 	var text string
-	// parse document content with open ai fallback, if raggo parser fails
 
 	if err != nil {
 		text, err = documentanalysis.ExtractTextWithOpenAI(ctx, filePath)
@@ -109,8 +121,6 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 	classification, confidence := documentanalysis.ClassifyDocument(text)
 	summary := documentanalysis.SummarizeDocument(text)
 
-	// TODO: handle raggo chunk
-
 	chunks := p.chunker.Chunk(text)
 	if len(chunks) == 0 {
 		if statusErr := p.store.Documents.UpdateDocumentProcessingStatus(ctx, documentID, "failed", "failed", 0); statusErr != nil {
@@ -119,7 +129,6 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 		return fmt.Errorf("no chunks produced for document %s: %w", payload.DocumentID, asynq.SkipRetry)
 	}
 
-	// TODO: Store chunks + embeddings in DB
 	embeddedChunks, err := p.embedChunksWithRetry(ctx, chunks, 3)
 	if err != nil {
 		return fmt.Errorf("embed document chunks: %w", err)
@@ -190,6 +199,16 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 	}
 	p.logger.Info("created document chunks", zap.Int("count", len(rows)))
 
+	chunksDedupeKey := fmt.Sprintf("%s:%s", models.EventChunksCreated, documentID.String())
+	p.trackAnalytics(ctx, models.AnalyticsEvent{
+		EventType:  models.EventChunksCreated,
+		ActorType:  actorType,
+		UserID:     &documentRecord.UserID,
+		DocumentID: &documentID,
+		Count:      int64(len(rows)),
+		DedupeKey:  &chunksDedupeKey,
+	})
+
 	if err := p.store.Documents.UpdateDocumentProcessingResult(
 		ctx,
 		documentID,
@@ -209,6 +228,30 @@ func (p *DocumentProcessor) ProcessTask(ctx context.Context, task *asynq.Task) e
 		})
 		return err
 	}
+
+	classificationMetadata, _ := json.Marshal(map[string]any{
+		"classification": classification,
+		"confidence":     confidence,
+	})
+	classificationDedupeKey := fmt.Sprintf("%s:%s", models.EventDocumentClassified, documentID.String())
+	p.trackAnalytics(ctx, models.AnalyticsEvent{
+		EventType:  models.EventDocumentClassified,
+		ActorType:  actorType,
+		UserID:     &documentRecord.UserID,
+		DocumentID: &documentID,
+		DedupeKey:  &classificationDedupeKey,
+		Metadata:   classificationMetadata,
+	})
+
+	p.logger.Infow("document processing completed",
+		"documentId", documentID.String(),
+		"userId", documentRecord.UserID.String(),
+		"status", "ready",
+		"processingStatus", "completed",
+		"chunkCount", len(rows),
+		"classification", classification,
+		"classificationConfidence", confidence,
+	)
 
 	p.publishDocumentStatus(ctx, dtos.DocumentStatusEvent{
 		DocumentID:       documentID.String(),

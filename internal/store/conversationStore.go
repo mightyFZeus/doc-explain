@@ -102,3 +102,16 @@ func (cs *ConversationStore) GetRecentMessages(ctx context.Context, conversation
 
 	return messages, nil
 }
+
+func (cs *ConversationStore) CountUserMessagesByUserID(ctx context.Context, userID uuid.UUID) (int64, error) {
+	var count int64
+
+	err := cs.db.WithContext(ctx).
+		Model(&models.DocumentMessage{}).
+		Joins("JOIN document_conversations ON document_conversations.id = document_messages.conversation_id").
+		Where("document_conversations.user_id = ?", userID).
+		Where("document_messages.role = ?", "user").
+		Count(&count).Error
+
+	return count, err
+}

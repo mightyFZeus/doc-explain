@@ -61,7 +61,9 @@ type middleWareConfig struct {
 
 func (app *application) mount() http.Handler {
 
-	origins := []string{}
+	origins := []string{
+		"http://localhost:3000",
+	}
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.RequestID)
@@ -89,6 +91,7 @@ func (app *application) mount() http.Handler {
 
 	r.Route("/v1/auth", func(r chi.Router) {
 		r.Post("/register", app.RegisterUser)
+		r.Post("/guest", app.CreateGuestSessionHandler)
 
 		r.Post("/login", app.LogingHandler)
 	})

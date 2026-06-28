@@ -8,6 +8,7 @@ The long-term product vision is RAG-as-a-Service for individuals, teams, and bus
 
 - User registration with email, password, full name, and terms acceptance.
 - JWT-authenticated document APIs.
+- Guest trial sessions for testing without signup.
 - User-scoped document upload, retrieval, search, conversations, and deletion.
 - Cloudinary integration for file storage.
 - Cloudinary upload webhook verification.
@@ -20,6 +21,7 @@ The long-term product vision is RAG-as-a-Service for individuals, teams, and bus
 - Document-scoped semantic search and streaming answer generation.
 - Document-level conversation persistence for follow-up questions.
 - WebSocket document processing status notifications.
+- Append-only analytics tracking for signups, guest sessions, uploads, chunks, classifications, questions, and answers.
 - Basic document classification and summary generation.
 - Webhook idempotency guard to avoid duplicate processing.
 - PostgreSQL/Gorm persistence layer.
@@ -121,6 +123,9 @@ REDIS_USERNAME=
 REDIS_PASSWORD=
 REDIS_DB=0
 
+PROCESS_JOBS_IN_API=true
+DOCUMENT_WORKER_CONCURRENCY=10
+
 CLOUDINARY_URL=cloudinary://<api-key>:<api-secret>@<cloud-name>
 CLOUDINARY_API_SECRET=<api-secret>
 
@@ -168,6 +173,8 @@ postgres://admin:adminpassword@localhost:5433/doc-explain-db?sslmode=disable
 go run ./cmd
 ```
 
+By default, the API also runs the document-processing queue consumer in the same process with up to 10 concurrent document jobs. This lets a demo deployment run as a single service while still keeping uploads asynchronous.
+
 Default routes:
 
 ```text
@@ -175,6 +182,7 @@ GET  /health
 POST /cloudinary/webhook
 
 POST /v1/auth/register
+POST /v1/auth/guest
 POST /v1/auth/login
 
 GET  /v1/documents
@@ -185,7 +193,7 @@ POST /v1/document/search
 GET  /v1/ws/document?documentId=<uuid>&token=<jwt>
 ```
 
-All `/v1` routes except `/v1/auth/register` and `/v1/auth/login` require authentication. HTTP requests use:
+All `/v1` routes except `/v1/auth/register`, `/v1/auth/guest`, and `/v1/auth/login` require authentication. HTTP requests use:
 
 ```text
 Authorization: Bearer <jwt>
@@ -193,15 +201,19 @@ Authorization: Bearer <jwt>
 
 Browser WebSocket clients cannot set custom `Authorization` headers, so the document status socket accepts the JWT as a `token` query parameter.
 
-## Running The Worker
+Guest sessions receive a normal JWT and can use the same document/chat flow, but are limited to one uploaded document and five questions.
 
-The worker consumes `document:process` jobs from Redis using Asynq.
+## Running The Optional Worker
+
+The standalone worker is still available for future scaling, but it is not required for the default demo deployment when `PROCESS_JOBS_IN_API=true`.
+
+If you deploy a separate worker service, set `PROCESS_JOBS_IN_API=false` on the API service so both processes do not consume the same queue.
 
 ```bash
 go run ./cmd/worker
 ```
 
-The worker currently validates task payloads and reserves the processing points for:
+The queue consumer validates task payloads and handles:
 
 - Fetching the uploaded document from Cloudinary.
 - Extracting readable text with Raggo, with OpenAI file parsing as a fallback when local parsing fails.

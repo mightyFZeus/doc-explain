@@ -28,6 +28,23 @@ func (us *UserStore) CreateUser(ctx context.Context, user models.User) error {
 	return nil
 }
 
+func (us *UserStore) GetByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
+	var user models.User
+
+	err := us.db.WithContext(ctx).
+		Where("id = ?", id).
+		First(&user).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+
+		return nil, err
+	}
+
+	return &user, nil
+}
+
 func (us *UserStore) UserExists(ctx context.Context, email string) (bool, error) {
 	var count int64
 

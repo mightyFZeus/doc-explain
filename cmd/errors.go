@@ -24,6 +24,11 @@ func (app *application) conflictResponse(w http.ResponseWriter, r *http.Request,
 	writeJSONError(w, http.StatusConflict, err.Error())
 }
 
+func (app *application) forbiddenResponse(w http.ResponseWriter, r *http.Request, err error) {
+	app.logger.Warnf("Forbidden", "method", r.Method, "path", r.URL.Path, "error", err.Error())
+	writeJSONError(w, http.StatusForbidden, err.Error())
+}
+
 func (app *application) unauthorizedResponse(w http.ResponseWriter, r *http.Request, err error) {
 	app.logger.Errorf("Un Authorized error", "method", r.Method, "path", r.URL.Path, "error", err.Error())
 	writeJSONError(w, http.StatusUnauthorized, "Your session has expired, login again")

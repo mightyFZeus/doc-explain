@@ -18,13 +18,16 @@ var (
 type Storage struct {
 	Users interface {
 		CreateUser(ctx context.Context, user models.User) error
+		GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 		UserExists(ctx context.Context, email string) (bool, error)
 		UserExistsByID(ctx context.Context, id uuid.UUID) (bool, error)
 		LoginUser(ctx context.Context, email, password string) (*models.User, error)
 	}
 	Documents interface {
 		SaveDocument(ctx context.Context, document models.Document) error
+		GetDocumentByID(ctx context.Context, documentID uuid.UUID) (models.Document, error)
 		GetAllDocuments(ctx context.Context, userID uuid.UUID) ([]models.Document, error)
+		CountDocumentsByUser(ctx context.Context, userID uuid.UUID) (int64, error)
 		DocumentBelongsToUser(ctx context.Context, documentID uuid.UUID, userID uuid.UUID) (bool, error)
 		DeleteDocument(ctx context.Context, documentID uuid.UUID, userID uuid.UUID) error
 		EncryptPlaintextChunks(ctx context.Context, encrypt func(string) (string, error)) (int64, error)
@@ -45,6 +48,11 @@ type Storage struct {
 		GetByDocumentID(ctx context.Context, documentID uuid.UUID, userID uuid.UUID) ([]models.DocumentConversation, error)
 		CreateMessage(ctx context.Context, message models.DocumentMessage) error
 		GetRecentMessages(ctx context.Context, conversationID uuid.UUID, limit int) ([]models.DocumentMessage, error)
+		CountUserMessagesByUserID(ctx context.Context, userID uuid.UUID) (int64, error)
+	}
+	Analytics interface {
+		Track(ctx context.Context, event models.AnalyticsEvent) error
+		CountByUser(ctx context.Context, userID uuid.UUID, eventType string) (int64, error)
 	}
 }
 
@@ -53,5 +61,6 @@ func NewStorage(db *gorm.DB) Storage {
 		Users:         &UserStore{db: db},
 		Documents:     &DocumentStore{db: db},
 		Conversations: &ConversationStore{db: db},
+		Analytics:     &AnalyticsStore{db: db},
 	}
 }

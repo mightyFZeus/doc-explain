@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 	"github.com/mightyfzeus/doc-explain/internal/models"
@@ -39,6 +40,24 @@ func (ds *DocumentStore) SaveDocument(ctx context.Context, document models.Docum
 		Create(&document).Error
 }
 
+func (ds *DocumentStore) GetDocumentByID(ctx context.Context, documentID uuid.UUID) (models.Document, error) {
+	var document models.Document
+
+	err := ds.db.WithContext(ctx).
+		Where("id = ?", documentID).
+		Where("deleted_at IS NULL").
+		First(&document).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return document, ErrDocumentNotFound
+		}
+
+		return document, err
+	}
+
+	return document, nil
+}
+
 func (ds *DocumentStore) GetAllDocuments(ctx context.Context, userID uuid.UUID) ([]models.Document, error) {
 	var documents []models.Document
 
@@ -49,6 +68,18 @@ func (ds *DocumentStore) GetAllDocuments(ctx context.Context, userID uuid.UUID) 
 		Find(&documents).Error
 
 	return documents, err
+}
+
+func (ds *DocumentStore) CountDocumentsByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	var count int64
+
+	err := ds.db.WithContext(ctx).
+		Model(&models.Document{}).
+		Where("user_id = ?", userID).
+		Where("deleted_at IS NULL").
+		Count(&count).Error
+
+	return count, err
 }
 
 func (ds *DocumentStore) DocumentBelongsToUser(ctx context.Context, documentID uuid.UUID, userID uuid.UUID) (bool, error) {

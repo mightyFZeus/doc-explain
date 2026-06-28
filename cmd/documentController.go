@@ -30,6 +30,11 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+const (
+	guestDocumentUploadLimit = 1
+	guestQuestionLimit       = 5
+)
+
 func (app *application) authenticatedUserID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	user, err := helpers.GetUserFromContext(r.Context())
 	if err != nil {
@@ -48,12 +53,54 @@ func (app *application) authenticatedUserID(w http.ResponseWriter, r *http.Reque
 	return userID, true
 }
 
+func (app *application) authenticatedUser(w http.ResponseWriter, r *http.Request) (*models.User, uuid.UUID, bool) {
+	userID, ok := app.authenticatedUserID(w, r)
+	if !ok {
+		return nil, uuid.Nil, false
+	}
+
+	user, err := app.store.Users.GetByID(r.Context(), userID)
+	if err != nil {
+		app.logger.Errorw("can't get authenticated user", "error", err)
+		app.unauthorizedResponse(w, r, err)
+		return nil, uuid.Nil, false
+	}
+
+	if user.AccountType == models.AccountTypeGuest {
+		if user.GuestExpiresAt == nil || time.Now().After(*user.GuestExpiresAt) {
+			app.unauthorizedResponse(w, r, errors.New("guest session expired"))
+			return nil, uuid.Nil, false
+		}
+	}
+
+	return user, userID, true
+}
+
 func (app *application) UploadDocumentHandler(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userID, ok := app.authenticatedUserID(w, r)
+	user, userID, ok := app.authenticatedUser(w, r)
 	if !ok {
 		return
+	}
+
+	if user.AccountType == models.AccountTypeGuest {
+		documentCount, err := app.store.Documents.CountDocumentsByUser(ctx, userID)
+		if err != nil {
+			app.internalServerError(w, r, err)
+			return
+		}
+
+		uploadedCount, err := app.store.Analytics.CountByUser(ctx, userID, models.EventDocumentUploaded)
+		if err != nil {
+			app.internalServerError(w, r, err)
+			return
+		}
+
+		if documentCount >= guestDocumentUploadLimit || uploadedCount >= guestDocumentUploadLimit {
+			app.forbiddenResponse(w, r, errors.New("guest users can upload only one document"))
+			return
+		}
 	}
 
 	// check size
@@ -141,6 +188,15 @@ func (app *application) UploadDocumentHandler(w http.ResponseWriter, r *http.Req
 		app.internalServerError(w, r, err)
 		return
 	}
+
+	dedupeKey := "document.uploaded:" + documentID.String()
+	app.trackAnalytics(ctx, models.AnalyticsEvent{
+		EventType:  models.EventDocumentUploaded,
+		ActorType:  models.ActorTypeForAccount(user.AccountType),
+		UserID:     &userID,
+		DocumentID: &documentID,
+		DedupeKey:  &dedupeKey,
+	})
 
 	app.jsonResponse(w, http.StatusOK, map[string]string{
 		"documentId": documentID.String(),
@@ -311,7 +367,7 @@ func (app *application) CloudinaryUploadWebhook(w http.ResponseWriter, r *http.R
 func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userID, ok := app.authenticatedUserID(w, r)
+	user, userID, ok := app.authenticatedUser(w, r)
 	if !ok {
 		return
 	}
@@ -321,6 +377,18 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 		return
 	}
 	query := strings.TrimSpace(payload.Query)
+
+	if user.AccountType == models.AccountTypeGuest {
+		questionCount, err := app.store.Conversations.CountUserMessagesByUserID(ctx, userID)
+		if err != nil {
+			app.internalServerError(w, r, err)
+			return
+		}
+		if questionCount >= guestQuestionLimit {
+			app.forbiddenResponse(w, r, errors.New("guest users can ask only five questions"))
+			return
+		}
+	}
 
 	conversation, err := app.store.Conversations.GetOrCreateByDocumentID(ctx, payload.DocumentID, userID)
 	if err != nil {
@@ -353,6 +421,13 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 		app.internalServerError(w, r, err)
 		return
 	}
+	app.trackAnalytics(ctx, models.AnalyticsEvent{
+		EventType:      models.EventQuestionAsked,
+		ActorType:      models.ActorTypeForAccount(user.AccountType),
+		UserID:         &userID,
+		DocumentID:     &payload.DocumentID,
+		ConversationID: &conversation.ID,
+	})
 
 	queryEmbedding, err := app.service.Embedder.Embed(ctx, standaloneQuery)
 	if err != nil {
@@ -432,6 +507,14 @@ func (app *application) SearchThroughDocumentHandler(w http.ResponseWriter, r *h
 		Content:        answer.String(),
 	}); err != nil {
 		app.logger.Errorw("failed to save assistant message", "error", err)
+	} else {
+		app.trackAnalytics(ctx, models.AnalyticsEvent{
+			EventType:      models.EventAnswerGenerated,
+			ActorType:      models.ActorTypeForAccount(user.AccountType),
+			UserID:         &userID,
+			DocumentID:     &payload.DocumentID,
+			ConversationID: &conversation.ID,
+		})
 	}
 
 	// Send done signal

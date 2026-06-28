@@ -21,7 +21,8 @@ func AutoMigrate(db *gorm.DB) error {
 		&models.Document{},
 		&models.DocumentChunk{},
 		&models.DocumentConversation{},
-		&models.DocumentMessage{}); err != nil {
+		&models.DocumentMessage{},
+		&models.AnalyticsEvent{}); err != nil {
 		return err
 	}
 
